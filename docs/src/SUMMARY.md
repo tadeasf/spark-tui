@@ -1,0 +1,16 @@
+# Summary
+
+- [Introduction](./introduction.md)
+- [Quick Start](./quickstart.md)
+- [Configuration](./configuration.md)
+- [Navigation & Keybindings](./navigation.md)
+- [Understanding Analysis](./analysis-guide.md)
+- [Architecture](./architecture.md)
+- [Module Reference](./modules/README.md)
+  - [Config](./modules/config.md)
+  - [Fetch](./modules/fetch.md)
+  - [Analyze](./modules/analyze.md)
+  - [TUI](./modules/tui.md)
+  - [Utilities](./modules/util.md)
+- [Troubleshooting](./troubleshooting.md)
+- [Contributing](./contributing.md)
