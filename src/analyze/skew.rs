@@ -271,6 +271,7 @@ mod tests {
             shuffle_write_records: 0,
             memory_bytes_spilled: 0,
             disk_bytes_spilled: 0,
+            peak_execution_memory: 0,
         }
     }
 
@@ -304,6 +305,7 @@ mod tests {
             shuffle_write_records: 0,
             memory_bytes_spilled: 0,
             disk_bytes_spilled: 0,
+            peak_execution_memory: 0,
         }
     }
 

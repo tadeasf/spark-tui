@@ -316,7 +316,9 @@ pub fn render_stage_detail(
     area: Rect,
     stage: &SparkStage,
     tasks: Option<&[SparkTask]>,
+    loading: bool,
     scroll: u16,
+    total_cluster_memory: i64,
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -378,7 +380,7 @@ pub fn render_stage_detail(
     }
     if stage.disk_bytes_spilled > 0 {
         io_parts.push(format!(
-            "spill: {} (mem: {})",
+            "spill: {} (RAM: {})",
             format_bytes(stage.disk_bytes_spilled),
             format_bytes(stage.memory_bytes_spilled)
         ));
@@ -394,14 +396,39 @@ pub fn render_stage_detail(
     if stage.executor_run_time > 0 {
         let cpu_ms = stage.executor_cpu_time / 1_000_000;
         let ratio = cpu_ms as f64 / stage.executor_run_time as f64;
+        let cpu_style = theme::cpu_utilization_style(ratio);
         lines.push(Line::from(vec![
             Span::styled(" CPU:  ", theme::tab_active()),
+            Span::styled(format!("{:.0}%", ratio * 100.0), cpu_style),
             Span::raw(format!(
-                "{:.0}% utilization (cpu: {} / runtime: {})",
-                ratio * 100.0,
+                " utilization (cpu: {} / runtime: {})",
                 format_duration_ms(cpu_ms),
                 format_duration_ms(stage.executor_run_time),
             )),
+        ]));
+    }
+
+    // Peak execution memory — stage-level with task-data fallback
+    let peak_mem = if stage.peak_execution_memory > 0 {
+        Some((stage.peak_execution_memory, "stage"))
+    } else if let Some(t) = tasks {
+        let max = t.iter().map(|t| t.peak_execution_memory).max().unwrap_or(0);
+        if max > 0 {
+            Some((max, "task max"))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some((mem_bytes, source)) = peak_mem {
+        let mem_style = theme::memory_utilization_style(mem_bytes, total_cluster_memory);
+        lines.push(Line::from(vec![
+            Span::styled(" RAM:  ", theme::tab_active()),
+            Span::raw("Peak execution RAM: "),
+            Span::styled(format_bytes(mem_bytes), mem_style),
+            Span::styled(format!(" ({})", source), theme::muted()),
         ]));
     }
 
@@ -535,6 +562,28 @@ pub fn render_stage_detail(
                 )));
             }
 
+            // -- Peak execution memory (task-level) --
+            let max_mem = tasks.iter().map(|t| t.peak_execution_memory).max().unwrap_or(0);
+            if max_mem > 0 {
+                let total_mem: i64 = tasks.iter().map(|t| t.peak_execution_memory).sum();
+                let avg_mem = total_mem / tasks.len() as i64;
+                let mem_style = theme::memory_utilization_style(max_mem, total_cluster_memory);
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Peak Execution Memory (per task)",
+                    theme::tab_active(),
+                )));
+                lines.push(Line::from(vec![
+                    Span::raw("   max: "),
+                    Span::styled(format_bytes(max_mem), mem_style),
+                    Span::raw(format!(
+                        "  avg: {}  total: {}",
+                        format_bytes(avg_mem),
+                        format_bytes(total_mem),
+                    )),
+                ]));
+            }
+
             lines.push(Line::from(""));
 
             // -- Skew metrics --
@@ -575,10 +624,17 @@ pub fn render_stage_detail(
             )));
         }
         None => {
-            lines.push(Line::from(Span::styled(
-                " Task data not fetched for this stage (only top stages by runtime/shuffle/parallelism have task data).",
-                theme::muted(),
-            )));
+            if loading {
+                lines.push(Line::from(Span::styled(
+                    " Loading task data...",
+                    theme::muted(),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    " Task data not fetched for this stage.",
+                    theme::muted(),
+                )));
+            }
         }
     }
 

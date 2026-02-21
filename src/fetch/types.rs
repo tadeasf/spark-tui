@@ -81,6 +81,8 @@ pub struct SparkStage {
     pub shuffle_write_records: i64,
     pub memory_bytes_spilled: i64,
     pub disk_bytes_spilled: i64,
+    #[serde(default)]
+    pub peak_execution_memory: i64,
     pub name: String,
     pub submission_time: Option<String>,
     pub completion_time: Option<String>,
@@ -106,6 +108,30 @@ pub struct SparkSqlExecution {
     pub success_job_ids: Vec<i64>,
     #[serde(default)]
     pub failed_job_ids: Vec<i64>,
+}
+
+// -- Executors --
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SparkExecutor {
+    pub id: String,
+    #[serde(default)]
+    pub total_cores: i64,
+    #[serde(default)]
+    pub max_memory: i64,
+    #[serde(default)]
+    pub is_active: bool,
+}
+
+/// Aggregated cluster resource summary from executor data.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct ClusterResources {
+    pub total_executor_memory: i64,
+    pub total_executor_cores: i64,
+    pub num_executors: usize,
 }
 
 // -- Tasks --
@@ -136,6 +162,7 @@ pub struct SparkTask {
     pub shuffle_write_records: i64,
     pub memory_bytes_spilled: i64,
     pub disk_bytes_spilled: i64,
+    pub peak_execution_memory: i64,
 }
 
 // -- Raw serde types matching Spark REST API nested shape --
@@ -190,6 +217,8 @@ struct RawTaskMetrics {
     #[serde(default)]
     disk_bytes_spilled: i64,
     #[serde(default)]
+    peak_execution_memory: i64,
+    #[serde(default)]
     input_metrics: Option<RawInputMetrics>,
     #[serde(default)]
     output_metrics: Option<RawOutputMetrics>,
@@ -203,13 +232,21 @@ struct RawTaskMetrics {
 #[serde(rename_all = "camelCase")]
 struct RawSparkTask {
     task_id: i64,
+    #[serde(default)]
     index: i64,
+    #[serde(default)]
     attempt: i64,
+    #[serde(default)]
     stage_id: i64,
+    #[serde(default)]
     stage_attempt_id: i64,
+    #[serde(default)]
     executor_id: String,
+    #[serde(default)]
     host: String,
+    #[serde(default)]
     status: String,
+    #[serde(default)]
     duration: Option<i64>,
     #[serde(default)]
     task_metrics: Option<RawTaskMetrics>,
@@ -226,6 +263,7 @@ impl<'de> Deserialize<'de> for SparkTask {
             executor_cpu_time: 0,
             memory_bytes_spilled: 0,
             disk_bytes_spilled: 0,
+            peak_execution_memory: 0,
             input_metrics: None,
             output_metrics: None,
             shuffle_read_metrics: None,
@@ -271,6 +309,7 @@ impl<'de> Deserialize<'de> for SparkTask {
             shuffle_write_records,
             memory_bytes_spilled: m.memory_bytes_spilled,
             disk_bytes_spilled: m.disk_bytes_spilled,
+            peak_execution_memory: m.peak_execution_memory,
         })
     }
 }

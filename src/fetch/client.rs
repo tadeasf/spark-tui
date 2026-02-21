@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 use thiserror::Error;
+use tracing::warn;
 
 #[derive(Error, Debug)]
 pub enum FetchError {
@@ -22,11 +23,12 @@ pub enum FetchError {
     #[error("HTTP {status}: {body}")]
     HttpError { status: u16, body: String },
 
-    #[error("Deserialization error: {source}")]
+    #[error("Deserialization error: {source} (url: {url})")]
     Deserialize {
         #[source]
-        source: reqwest::Error,
+        source: serde_json::Error,
         url: String,
+        body_sample: String,
     },
 
     #[error("Request failed: {0}")]
@@ -83,9 +85,27 @@ impl SparkHttpClient {
             };
         }
 
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| FetchError::Deserialize { source: e, url })
+        let body = response.text().await?;
+
+        serde_json::from_str::<T>(&body).map_err(|e| {
+            let sample = if body.len() > 500 {
+                format!(
+                    "{}...(truncated, {} bytes total)",
+                    &body[..500],
+                    body.len()
+                )
+            } else {
+                body
+            };
+            warn!(
+                "Deserialization failed for {}: {} | Body sample: {}",
+                url, e, sample
+            );
+            FetchError::Deserialize {
+                source: e,
+                url,
+                body_sample: sample,
+            }
+        })
     }
 }

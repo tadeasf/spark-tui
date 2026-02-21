@@ -10,7 +10,7 @@ use crate::analyze::types::HealthSummary;
 use crate::util::format::format_bytes;
 
 pub fn render_summary_bar(f: &mut Frame, area: Rect, summary: &HealthSummary) {
-    let bg_color = if summary.critical_count > 0 {
+    let fg_color = if summary.critical_count > 0 {
         Color::Red
     } else if summary.warning_count > 0 {
         Color::Yellow
@@ -18,13 +18,7 @@ pub fn render_summary_bar(f: &mut Frame, area: Rect, summary: &HealthSummary) {
         Color::Green
     };
 
-    let fg_color = if bg_color == Color::Yellow {
-        Color::Black
-    } else {
-        Color::White
-    };
-
-    let base_style = Style::default().fg(fg_color).bg(bg_color);
+    let base_style = Style::default().fg(fg_color);
 
     // Line 1: Jobs | I/O | Health counts
     let job_info = if summary.running_jobs > 0 || summary.failed_jobs > 0 {

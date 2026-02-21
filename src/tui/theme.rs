@@ -89,3 +89,43 @@ pub fn spill_bytes_style(bytes: i64) -> Style {
         critical()
     }
 }
+
+/// CPU utilization color (ratio 0.0–1.0).
+pub fn cpu_utilization_style(ratio: f64) -> Style {
+    if ratio >= 0.95 {
+        critical() // CPU saturated
+    } else if ratio >= 0.5 {
+        healthy() // healthy range
+    } else if ratio >= 0.3 {
+        warning() // underutilized
+    } else {
+        critical() // severe I/O bound
+    }
+}
+
+/// Peak memory color relative to cluster memory. Falls back to absolute thresholds.
+pub fn memory_utilization_style(peak_bytes: i64, total_cluster_memory: i64) -> Style {
+    if total_cluster_memory > 0 {
+        let ratio = peak_bytes as f64 / total_cluster_memory as f64;
+        if ratio >= 0.8 {
+            critical()
+        } else if ratio >= 0.5 {
+            warning()
+        } else if ratio >= 0.1 {
+            healthy()
+        } else {
+            Style::default()
+        }
+    } else {
+        // Fallback when executor data unavailable
+        if peak_bytes >= 10 * GB {
+            critical()
+        } else if peak_bytes >= GB {
+            warning()
+        } else if peak_bytes >= 100 * MB {
+            healthy()
+        } else {
+            Style::default()
+        }
+    }
+}

@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -7,6 +10,9 @@ use ratatui::{
     widgets::{Block, Borders, TableState, Tabs},
 };
 use tokio::sync::mpsc;
+use tracing::warn;
+
+use crate::fetch::client::SparkHttpClient;
 
 use super::tabs::{jobs, suspects};
 use super::widgets::{status_line, summary_bar};
@@ -67,10 +73,17 @@ pub struct App {
     pub detail_table_state: TableState,
     pub sql_scroll: u16,
     pub stage_detail_scroll: u16,
+    client: Arc<SparkHttpClient>,
+    tx: mpsc::UnboundedSender<Action>,
+    pending_task_fetches: HashSet<i64>,
 }
 
 impl App {
-    pub fn new(cluster_id: String) -> Self {
+    pub fn new(
+        cluster_id: String,
+        client: Arc<SparkHttpClient>,
+        tx: mpsc::UnboundedSender<Action>,
+    ) -> Self {
         Self {
             active_tab: Tab::Jobs,
             view_mode: ViewMode::List,
@@ -83,13 +96,16 @@ impl App {
             detail_table_state: TableState::default(),
             sql_scroll: 0,
             stage_detail_scroll: 0,
+            client,
+            tx,
+            pending_task_fetches: HashSet::new(),
         }
     }
 
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::Key(key) => self.handle_key(key),
-            Action::DataUpdate(payload) => {
+            Action::DataUpdate(mut payload) => {
                 self.error_msg = None;
 
                 // Preserve selection across refresh
@@ -116,10 +132,34 @@ impl App {
                     }
                 }
 
+                // Preserve on-demand fetched task data across poller refreshes
+                if let Some(old_data) = &self.data {
+                    let mut merged =
+                        (*payload.stage_tasks).clone();
+                    for (stage_id, tasks) in old_data.stage_tasks.iter() {
+                        merged.entry(*stage_id).or_insert_with(|| tasks.clone());
+                    }
+                    payload.stage_tasks = Arc::new(merged);
+                }
+
                 self.data = Some(payload);
             }
             Action::FetchError(err) => {
                 self.error_msg = Some(err.to_string());
+            }
+            Action::TaskDataLoaded(stage_id, tasks) => {
+                self.pending_task_fetches.remove(&stage_id);
+                if let Some(data) = &self.data {
+                    let mut map = (*data.stage_tasks).clone();
+                    map.insert(stage_id, tasks);
+                    let mut new_data = data.clone();
+                    new_data.stage_tasks = Arc::new(map);
+                    self.data = Some(new_data);
+                }
+            }
+            Action::TaskFetchFailed(stage_id, err) => {
+                self.pending_task_fetches.remove(&stage_id);
+                warn!("Failed to fetch tasks for stage {}: {}", stage_id, err);
             }
             Action::Resize(_, _) => {}
             Action::Mouse(_) => {}
@@ -258,9 +298,38 @@ impl App {
                                     .iter()
                                     .filter(|s| job.stage_ids.contains(&s.stage_id))
                                     .collect();
-                                if job_stages.get(stage_idx).is_some() {
+                                if let Some(stage) = job_stages.get(stage_idx) {
                                     self.stage_detail_scroll = 0;
                                     self.view_mode = ViewMode::StageDetail;
+
+                                    // Trigger on-demand task fetch if not already loaded/pending
+                                    let sid = stage.stage_id;
+                                    let aid = stage.attempt_id;
+                                    if !data.stage_tasks.contains_key(&sid)
+                                        && !self.pending_task_fetches.contains(&sid)
+                                    {
+                                        self.pending_task_fetches.insert(sid);
+                                        let client = Arc::clone(&self.client);
+                                        let tx = self.tx.clone();
+                                        let app_id = data.app_id.clone();
+                                        tokio::spawn(async move {
+                                            match client
+                                                .get_task_list(&app_id, sid, aid)
+                                                .await
+                                            {
+                                                Ok(tasks) => {
+                                                    let _ =
+                                                        tx.send(Action::TaskDataLoaded(sid, tasks));
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(Action::TaskFetchFailed(
+                                                        sid,
+                                                        e.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -405,12 +474,16 @@ impl App {
                                         .stage_tasks
                                         .get(&stage.stage_id)
                                         .map(|v| v.as_slice());
+                                    let loading =
+                                        self.pending_task_fetches.contains(&stage.stage_id);
                                     jobs::render_stage_detail(
                                         f,
                                         area,
                                         stage,
                                         tasks,
+                                        loading,
                                         self.stage_detail_scroll,
+                                        data.cluster_resources.total_executor_memory,
                                     );
                                 } else {
                                     self.view_mode = ViewMode::JobDetail;

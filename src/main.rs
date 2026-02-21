@@ -87,7 +87,7 @@ async fn main() {
     let mut terminal = ratatui::init();
 
     // Run app
-    let mut app = App::new(config.cluster_id);
+    let mut app = App::new(config.cluster_id, Arc::clone(&client), tx.clone());
     let result = app.run(&mut terminal, rx).await;
 
     // Restore terminal

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::analyze::types::{HealthSummary, RankedJob, Suspect};
 use crate::fetch::client::FetchError;
-use crate::fetch::types::{SparkSqlExecution, SparkStage, SparkTask};
+use crate::fetch::types::{ClusterResources, SparkSqlExecution, SparkStage, SparkTask};
 use crossterm::event::KeyEvent;
 
 /// All data needed to render the TUI.
@@ -22,6 +22,7 @@ pub struct DataPayload {
     pub suspects: Vec<Suspect>,
     pub stage_tasks: Arc<HashMap<i64, Vec<SparkTask>>>,
     pub summary: HealthSummary,
+    pub cluster_resources: ClusterResources,
     pub last_updated: String,
 }
 
@@ -33,4 +34,6 @@ pub enum Action {
     Resize(u16, u16),
     DataUpdate(DataPayload),
     FetchError(FetchError),
+    TaskDataLoaded(i64, Vec<SparkTask>),
+    TaskFetchFailed(i64, String),
 }

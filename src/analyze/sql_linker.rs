@@ -51,22 +51,22 @@ pub fn find_sql_for_job(
 /// Combines top-by-runtime, top-by-shuffle, and high-parallelism stages.
 /// Capped at 15 to keep API calls bounded.
 pub fn stages_for_task_analysis(stages: &[SparkStage]) -> Vec<(i64, i64)> {
-    let completed: Vec<&SparkStage> = stages
+    let eligible: Vec<&SparkStage> = stages
         .iter()
-        .filter(|s| s.status == StageStatus::Complete)
+        .filter(|s| s.status == StageStatus::Complete || s.status == StageStatus::Failed)
         .collect();
 
     let mut selected: HashMap<i64, i64> = HashMap::new();
 
     // Top 5 by executor_run_time
-    let mut by_runtime = completed.clone();
+    let mut by_runtime = eligible.clone();
     by_runtime.sort_by(|a, b| b.executor_run_time.cmp(&a.executor_run_time));
     for s in by_runtime.iter().take(5) {
         selected.entry(s.stage_id).or_insert(s.attempt_id);
     }
 
     // Top 5 by shuffle_write_bytes
-    let mut by_shuffle = completed.clone();
+    let mut by_shuffle = eligible.clone();
     by_shuffle.sort_by(|a, b| b.shuffle_write_bytes.cmp(&a.shuffle_write_bytes));
     for s in by_shuffle
         .iter()
@@ -77,7 +77,7 @@ pub fn stages_for_task_analysis(stages: &[SparkStage]) -> Vec<(i64, i64)> {
     }
 
     // High-parallelism stages (>100 tasks)
-    for s in completed.iter().filter(|s| s.num_tasks > 100) {
+    for s in eligible.iter().filter(|s| s.num_tasks > 100) {
         selected.entry(s.stage_id).or_insert(s.attempt_id);
     }
 

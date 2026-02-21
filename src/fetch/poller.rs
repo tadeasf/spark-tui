@@ -15,6 +15,7 @@ use crate::analyze::suspects::{
 };
 use crate::analyze::types::{HealthSummary, RankedJob, Severity};
 use crate::fetch::client::SparkHttpClient;
+use crate::fetch::types::ClusterResources;
 use crate::tui::{Action, DataPayload};
 use crate::util::time::duration_between;
 
@@ -59,16 +60,35 @@ async fn poll_once(
     client: &SparkHttpClient,
     app_id: &str,
 ) -> Result<DataPayload, crate::fetch::client::FetchError> {
-    // Fetch jobs, stages, SQL concurrently
-    let (jobs_res, stages_res, sql_res) = tokio::join!(
+    // Fetch jobs, stages, SQL, executors concurrently
+    let (jobs_res, stages_res, sql_res, executors_res) = tokio::join!(
         client.get_jobs(app_id),
         client.get_stages(app_id),
         client.get_sql_executions(app_id),
+        client.get_executors(app_id),
     );
 
     let jobs = jobs_res?;
     let stages = stages_res?;
     let sql_executions = sql_res?;
+
+    let cluster_resources = match executors_res {
+        Ok(executors) => {
+            let active: Vec<_> = executors
+                .iter()
+                .filter(|e| e.id != "driver" && e.is_active)
+                .collect();
+            ClusterResources {
+                total_executor_memory: active.iter().map(|e| e.max_memory).sum(),
+                total_executor_cores: active.iter().map(|e| e.total_cores).sum(),
+                num_executors: active.len(),
+            }
+        }
+        Err(e) => {
+            warn!("Failed to fetch executor data: {}", e);
+            ClusterResources::default()
+        }
+    };
 
     // Build maps
     let job_to_sql = build_job_to_sql_map(&sql_executions);
@@ -228,6 +248,7 @@ async fn poll_once(
         suspects,
         stage_tasks: std::sync::Arc::new(stage_tasks),
         summary,
+        cluster_resources,
         last_updated: now,
     })
 }
