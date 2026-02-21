@@ -26,7 +26,9 @@ pub fn highlight_sql(sql_text: &str) -> Vec<Line<'static>> {
 
     for line in LinesWithEndings::from(sql_text) {
         let Ok(ranges) = highlighter.highlight_line(line, ss) else {
-            lines.push(Line::from(Span::raw(line.to_string())));
+            lines.push(Line::from(Span::raw(
+                line.trim_end_matches(['\n', '\r']).to_string(),
+            )));
             continue;
         };
 
@@ -35,7 +37,10 @@ pub fn highlight_sql(sql_text: &str) -> Vec<Line<'static>> {
             .map(|(style, text)| {
                 let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                 let ratatui_style = Style::default().fg(fg);
-                Span::styled(text.to_string(), ratatui_style)
+                Span::styled(
+                    text.trim_end_matches(['\n', '\r']).to_string(),
+                    ratatui_style,
+                )
             })
             .collect();
 
@@ -96,6 +101,14 @@ const PLAN_KEYWORDS: &[&str] = &[
     "Window",
     "WindowExec",
     "WindowGroupLimit",
+    // Python UDF nodes
+    "ArrowEvalPython",
+    "BatchEvalPython",
+    "FlatMapGroupsInPandas",
+    "MapInPandas",
+    "PythonUDF",
+    "PythonUDAF",
+    "PythonUDTF",
 ];
 
 fn highlight_plan_line(line: &str) -> Line<'static> {

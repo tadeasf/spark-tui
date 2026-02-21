@@ -2,21 +2,22 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use crate::analyze::types::{BottleneckPattern, Suspect};
 use crate::tui::theme;
-use crate::util::format::{clean_stage_name, truncate};
+use crate::util::format::{clean_stage_name, format_duration_ms, truncate};
 
 pub fn render_suspects_tab(
     f: &mut Frame,
     area: ratatui::layout::Rect,
     suspects: &[Suspect],
     state: &mut TableState,
+    critical_stages: &std::collections::HashSet<i64>,
 ) {
     // Split into table (top) and detail panel (bottom, 14 lines)
-    let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(14)]).split(area);
+    let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(15)]).split(area);
 
     // -- Table --
     let header_cells = ["Sev", "Category", "Pattern", "Stage", "Job", "SQL", "Title"]
@@ -29,15 +30,8 @@ pub fn render_suspects_tab(
         .map(|s| {
             let sev_style = theme::severity_style(s.severity);
 
-            let job_str = match s.job_id {
-                Some(id) => id.to_string(),
-                None => "-".to_string(),
-            };
-
-            let sql_str = match s.sql_id {
-                Some(id) => format!("#{}", id),
-                None => "-".to_string(),
-            };
+            let job_str = s.job_id.map_or("-".into(), |id| id.to_string());
+            let sql_str = s.sql_id.map_or("-".into(), |id| format!("#{id}"));
 
             let (pattern_str, pattern_style) = match s.bottleneck {
                 Some(BottleneckPattern::LargeScan) => ("Large Scan".to_string(), theme::warning()),
@@ -80,7 +74,7 @@ pub fn render_suspects_tab(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Suspects (sorted by severity)"),
+                .title("Suspects (severity → savings)"),
         )
         .row_highlight_style(theme::selected())
         .highlight_symbol("▶ ");
@@ -101,10 +95,19 @@ pub fn render_suspects_tab(
             Some(name) => format!("Stage {}: {}", s.stage_id, clean_stage_name(name)),
             None => format!("Stage {}", s.stage_id),
         };
-        lines.push(Line::from(vec![
-            Span::styled("Stage:   ", theme::tab_active()),
-            Span::raw(stage_label),
-        ]));
+        let stage_spans = if critical_stages.contains(&s.stage_id) {
+            vec![
+                Span::styled("Stage:   ", theme::tab_active()),
+                Span::raw(stage_label),
+                Span::styled("  [Critical Path]", theme::critical()),
+            ]
+        } else {
+            vec![
+                Span::styled("Stage:   ", theme::tab_active()),
+                Span::raw(stage_label),
+            ]
+        };
+        lines.push(Line::from(stage_spans));
 
         // SQL line
         if let Some(sql_id) = s.sql_id {
@@ -153,6 +156,20 @@ pub fn render_suspects_tab(
             ]));
         }
 
+        // Estimated savings
+        if s.estimated_savings_ms > 0 {
+            lines.push(Line::from(vec![
+                Span::styled("Savings: ", theme::tab_active()),
+                Span::styled(
+                    format!(
+                        "~{} potential savings",
+                        format_duration_ms(s.estimated_savings_ms)
+                    ),
+                    theme::healthy(),
+                ),
+            ]));
+        }
+
         // Recommendation line (styled in green)
         if let Some(rec) = &s.recommendation {
             lines.push(Line::from(vec![
@@ -161,10 +178,14 @@ pub fn render_suspects_tab(
             ]));
         }
 
-        let paragraph = Paragraph::new(lines).block(detail_block);
+        let paragraph = Paragraph::new(lines)
+            .block(detail_block)
+            .wrap(Wrap { trim: true });
         f.render_widget(paragraph, chunks[1]);
     } else {
-        let paragraph = Paragraph::new("No suspect selected.").block(detail_block);
+        let paragraph = Paragraph::new("No suspect selected.")
+            .block(detail_block)
+            .wrap(Wrap { trim: true });
         f.render_widget(paragraph, chunks[1]);
     }
 }

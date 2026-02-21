@@ -46,6 +46,11 @@ pub enum SuspectCategory {
     TaskFailures,
     MemoryPressure,
     ExecutorHotspot,
+    TooManyPartitions,
+    TooFewPartitions,
+    BroadcastJoinOpportunity,
+    PythonUdf,
+    CacheOpportunity,
 }
 
 impl fmt::Display for SuspectCategory {
@@ -62,6 +67,11 @@ impl fmt::Display for SuspectCategory {
             SuspectCategory::TaskFailures => write!(f, "Task Fail"),
             SuspectCategory::MemoryPressure => write!(f, "Mem Pressure"),
             SuspectCategory::ExecutorHotspot => write!(f, "Exec Hotspot"),
+            SuspectCategory::TooManyPartitions => write!(f, "Too Many Parts"),
+            SuspectCategory::TooFewPartitions => write!(f, "Too Few Parts"),
+            SuspectCategory::BroadcastJoinOpportunity => write!(f, "Bcast Join"),
+            SuspectCategory::PythonUdf => write!(f, "Python UDF"),
+            SuspectCategory::CacheOpportunity => write!(f, "Cache Oppty"),
         }
     }
 }
@@ -102,6 +112,7 @@ pub struct Suspect {
     pub recommendation: Option<String>,
     pub bottleneck: Option<BottleneckPattern>,
     pub sql_plan_hint: Option<String>,
+    pub estimated_savings_ms: i64,
 }
 
 impl Suspect {
@@ -127,6 +138,7 @@ impl Suspect {
             recommendation: None,
             bottleneck: None,
             sql_plan_hint: None,
+            estimated_savings_ms: 0,
         }
     }
 }

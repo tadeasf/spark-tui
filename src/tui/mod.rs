@@ -4,7 +4,7 @@ pub mod tabs;
 pub mod theme;
 pub mod widgets;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::analyze::types::{HealthSummary, RankedJob, Suspect};
@@ -23,6 +23,8 @@ pub struct DataPayload {
     pub stage_tasks: Arc<HashMap<i64, Vec<SparkTask>>>,
     pub summary: HealthSummary,
     pub cluster_resources: ClusterResources,
+    pub stage_sql_hints: Arc<HashMap<i64, String>>,
+    pub critical_stages: Arc<HashSet<i64>>,
     pub last_updated: String,
 }
 

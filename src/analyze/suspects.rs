@@ -4,9 +4,70 @@ use super::types::{BottleneckPattern, Severity, Suspect, SuspectCategory};
 use crate::fetch::types::{SparkStage, StageStatus};
 use crate::util::format::{format_bytes, format_duration_ms, parse_plan_top_operations};
 
-const ONE_HUNDRED_MB: i64 = 104_857_600;
-const FIVE_HUNDRED_MB: i64 = 524_288_000;
-const ONE_GB: i64 = 1_073_741_824;
+const ONE_MB: i64 = 1_048_576;
+const FIFTY_MB: i64 = 50 * ONE_MB;
+const ONE_HUNDRED_MB: i64 = 100 * ONE_MB;
+const FIVE_HUNDRED_MB: i64 = 500 * ONE_MB;
+const ONE_GB: i64 = 1024 * ONE_MB;
+
+/// Holds all lookup maps needed by suspect detectors, eliminating repetitive parameters.
+pub struct SuspectContext<'a> {
+    pub stage_to_job: &'a HashMap<i64, i64>,
+    pub job_to_sql: &'a HashMap<i64, i64>,
+    pub sql_descriptions: &'a HashMap<i64, String>,
+    pub sql_plans: &'a HashMap<i64, String>,
+}
+
+impl<'a> SuspectContext<'a> {
+    pub fn new(
+        stage_to_job: &'a HashMap<i64, i64>,
+        job_to_sql: &'a HashMap<i64, i64>,
+        sql_descriptions: &'a HashMap<i64, String>,
+        sql_plans: &'a HashMap<i64, String>,
+    ) -> Self {
+        Self {
+            stage_to_job,
+            job_to_sql,
+            sql_descriptions,
+            sql_plans,
+        }
+    }
+
+    /// Look up the job_id for a stage.
+    pub fn job_id(&self, stage_id: i64) -> Option<i64> {
+        self.stage_to_job.get(&stage_id).copied()
+    }
+
+    /// Resolve the SQL id and description for a stage via its job.
+    fn resolve_sql(&self, stage_id: i64) -> (Option<i64>, Option<String>) {
+        let job_id = self.stage_to_job.get(&stage_id).copied();
+        let sql_id = job_id.and_then(|jid| self.job_to_sql.get(&jid).copied());
+        let sql_desc = sql_id.and_then(|sid| self.sql_descriptions.get(&sid).cloned());
+        (sql_id, sql_desc)
+    }
+
+    /// Resolve the SQL plan hint for a stage.
+    pub fn resolve_plan_hint_for(&self, stage_id: i64) -> Option<String> {
+        let job_id = self.stage_to_job.get(&stage_id).copied()?;
+        let sql_id = self.job_to_sql.get(&job_id).copied()?;
+        let plan = self.sql_plans.get(&sql_id)?;
+        let ops = parse_plan_top_operations(plan, 3);
+        if ops.is_empty() {
+            return None;
+        }
+        Some(ops.join(" → "))
+    }
+
+    /// Enrich a suspect with common stage metadata: stage_name, sql linkage, I/O summary, plan hint.
+    pub fn enrich(&self, suspect: &mut Suspect, stage: &SparkStage) {
+        let (sql_id, sql_description) = self.resolve_sql(stage.stage_id);
+        suspect.stage_name = Some(stage.name.clone());
+        suspect.sql_id = sql_id;
+        suspect.sql_description = sql_description;
+        suspect.io_summary = Some(stage_io_summary(stage));
+        suspect.sql_plan_hint = self.resolve_plan_hint_for(stage.stage_id);
+    }
+}
 
 /// Classify the root-cause bottleneck pattern for a stage.
 pub fn classify_bottleneck(s: &SparkStage) -> Option<BottleneckPattern> {
@@ -27,39 +88,22 @@ pub fn classify_bottleneck(s: &SparkStage) -> Option<BottleneckPattern> {
     None
 }
 
-/// Get a pattern-specific recommendation for a bottleneck.
+/// Get a PySpark-specific recommendation for a bottleneck.
 fn bottleneck_recommendation(pattern: BottleneckPattern) -> &'static str {
     match pattern {
         BottleneckPattern::LargeScan => {
-            "Add partition filters or push down predicates to reduce scan volume."
+            "Filter early: df.filter(F.col('date') >= '2024-01-01') and select only needed columns: df.select('col1', 'col2'). Use partition pruning on date/region columns."
         }
         BottleneckPattern::WideShuffle => {
-            "Reduce shuffle: broadcast join small tables, pre-aggregate, or repartition()."
+            "Use broadcast for small tables: from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), ...). Pre-aggregate with groupBy before joins."
         }
         BottleneckPattern::DataExplosion => {
-            "Check for cross joins, explode(), cartesian products. Add join conditions."
+            "Filter before explode, not after: df.filter(...).withColumn('x', explode('arr')). Check for unintentional cross joins — add explicit join conditions."
         }
         BottleneckPattern::RecordExplosion => {
-            "Check for explode(), cross joins, or generate(). Output records >> input records."
+            "Check for explode()/posexplode() on large arrays, or cross joins. Filter input before explode: df.filter(...).select(explode('col'))."
         }
     }
-}
-
-/// Resolve the SQL plan hint for a stage given its sql_id and available plans.
-fn resolve_plan_hint(
-    stage_id: i64,
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_plans: &HashMap<i64, String>,
-) -> Option<String> {
-    let job_id = stage_to_job.get(&stage_id).copied()?;
-    let sql_id = job_to_sql.get(&job_id).copied()?;
-    let plan = sql_plans.get(&sql_id)?;
-    let ops = parse_plan_top_operations(plan, 3);
-    if ops.is_empty() {
-        return None;
-    }
-    Some(ops.join(" → "))
 }
 
 /// Build a one-line I/O summary for a stage, including in:out ratio when significant.
@@ -77,7 +121,6 @@ fn stage_io_summary(s: &SparkStage) -> String {
     if s.shuffle_write_bytes > 0 {
         parts.push(format!("shuf_w: {}", format_bytes(s.shuffle_write_bytes)));
     }
-    // Add in:out ratio when both > 0 and ratio > 2.0
     if s.input_bytes > 0 && s.output_bytes > 0 {
         let ratio = s.input_bytes as f64 / s.output_bytes as f64;
         if ratio > 2.0 {
@@ -91,28 +134,9 @@ fn stage_io_summary(s: &SparkStage) -> String {
     }
 }
 
-/// Look up the SQL id and description for a stage via its job.
-fn resolve_sql(
-    stage_id: i64,
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-) -> (Option<i64>, Option<String>) {
-    let job_id = stage_to_job.get(&stage_id).copied();
-    let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
-    let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid).cloned());
-    (sql_id, sql_desc)
-}
-
 /// Detect stages that are significantly slower than average.
 /// Flag stages with executor_run_time > 2 stddev above the mean.
-pub fn detect_slow_stages(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_slow_stages(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     let completed: Vec<&SparkStage> = stages
         .iter()
         .filter(|s| s.status == StageStatus::Complete && s.executor_run_time > 0)
@@ -147,8 +171,6 @@ pub fn detect_slow_stages(
             } else {
                 Severity::Warning
             };
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let bottleneck = classify_bottleneck(s);
             let tag = bottleneck
                 .map(|b| format!(" [{}]", b))
@@ -157,7 +179,7 @@ pub fn detect_slow_stages(
                 severity,
                 SuspectCategory::SlowStage,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 format!(
                     "Stage {} took {}{}",
                     s.stage_id,
@@ -171,34 +193,24 @@ pub fn detect_slow_stages(
                     s.executor_run_time as f64 / mean
                 ),
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
             suspect.bottleneck = bottleneck;
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 - mean) as i64;
             suspect.recommendation = Some(
                 bottleneck
                     .map(|b| bottleneck_recommendation(b).to_string())
                     .unwrap_or_else(|| {
-                        "Check code location. Large shuffle may indicate missing filters or broad joins."
+                        "Check code location. Try df.explain(True) to see the query plan. Large shuffle may indicate missing filters or broad joins."
                             .to_string()
                     }),
             );
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
             suspect
         })
         .collect()
 }
 
 /// Detect stages with disk spill. Critical if > 1GB.
-pub fn detect_spill(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_spill(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     stages
         .iter()
         .filter(|s| s.disk_bytes_spilled > 0)
@@ -208,14 +220,12 @@ pub fn detect_spill(
             } else {
                 Severity::Warning
             };
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let bottleneck = classify_bottleneck(s);
             let mut suspect = Suspect::new(
                 severity,
                 SuspectCategory::DiskSpill,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 format!(
                     "Stage {} spilled {} to disk",
                     s.stage_id,
@@ -227,40 +237,29 @@ pub fn detect_spill(
                     format_bytes(s.disk_bytes_spilled)
                 ),
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
             suspect.bottleneck = bottleneck;
+            // Spill overhead estimated at ~30% of runtime
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.3) as i64;
             suspect.recommendation = Some(match bottleneck {
                 Some(b) => format!(
-                    "Increase spark.executor.memory or reduce partition size. {}",
+                    "spark.conf.set('spark.executor.memory', '8g') or df.repartition(200). {}",
                     bottleneck_recommendation(b)
                 ),
                 None => {
-                    "Increase spark.executor.memory or reduce partition size with repartition()."
+                    "spark.conf.set('spark.executor.memory', '8g') or df.repartition(200) to reduce partition size."
                         .to_string()
                 }
             });
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
             suspect
         })
         .collect()
 }
 
-const FIFTY_MB: i64 = 52_428_800;
-
 /// Detect CPU efficiency issues.
 /// cpu_ratio = (executor_cpu_time / 1_000_000) / executor_run_time
 /// Low ratio → I/O bound; High ratio with long runtime → CPU saturated.
-pub fn detect_cpu_efficiency(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_cpu_efficiency(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     stages
         .iter()
         .filter(|s| s.status == StageStatus::Complete && s.executor_run_time > 10_000)
@@ -288,7 +287,7 @@ pub fn detect_cpu_efficiency(
                             format_duration_ms(run_ms),
                             ratio * 100.0
                         ),
-                        "Stage is I/O or GC bound. Consider: increase memory, improve data locality, use faster storage, check GC pauses."
+                        "I/O bound — try: spark.conf.set('spark.executor.memory', '8g'), cache hot DataFrames with df.cache(), or use df.repartition() for better locality."
                             .to_string(),
                     )
                 } else if ratio > 0.9 && run_ms > 30_000 {
@@ -306,43 +305,32 @@ pub fn detect_cpu_efficiency(
                             format_duration_ms(cpu_ms),
                             format_duration_ms(run_ms)
                         ),
-                        "CPU saturated. Consider: cache intermediate results, simplify UDFs, increase parallelism."
+                        "CPU saturated — replace @udf with @pandas_udf or native F.when()/F.expr(). Cache with df.cache() and increase parallelism with df.repartition(N)."
                             .to_string(),
                     )
                 } else {
                     return None;
                 };
 
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let mut suspect = Suspect::new(
                 severity,
                 category,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 title,
                 detail,
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
             suspect.recommendation = Some(recommendation);
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
+            // ~20% savings from fixing CPU/IO bottleneck
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.2) as i64;
             Some(suspect)
         })
         .collect()
 }
 
 /// Detect record explosion: output_records > 10x input_records.
-pub fn detect_record_explosion(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_record_explosion(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     stages
         .iter()
         .filter(|s| s.input_records > 1000 && s.output_records > 10 * s.input_records)
@@ -353,13 +341,11 @@ pub fn detect_record_explosion(
             } else {
                 Severity::Warning
             };
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let mut suspect = Suspect::new(
                 severity,
                 SuspectCategory::RecordExplosion,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 format!(
                     "Stage {} output {:.0}x more records than input",
                     s.stage_id, ratio
@@ -369,30 +355,21 @@ pub fn detect_record_explosion(
                     s.input_records, s.output_records, ratio
                 ),
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
             suspect.bottleneck = Some(BottleneckPattern::RecordExplosion);
+            // ~50% savings from fixing record explosion
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.5) as i64;
             suspect.recommendation = Some(
-                "Check for explode(), cross joins, or generate(). Output records >> input records."
+                "Filter before explode: df.filter(...).select(explode('col')). Check for unintentional cross joins — add explicit join conditions."
                     .to_string(),
             );
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
             suspect
         })
         .collect()
 }
 
 /// Detect stages with task failures or killed tasks.
-pub fn detect_task_failures(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_task_failures(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     stages
         .iter()
         .filter(|s| s.num_failed_tasks > 0 || s.num_killed_tasks > 0)
@@ -408,13 +385,11 @@ pub fn detect_task_failures(
             } else {
                 Severity::Warning
             };
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let mut suspect = Suspect::new(
                 severity,
                 SuspectCategory::TaskFailures,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 format!(
                     "Stage {} has {} failed + {} killed tasks ({:.0}%)",
                     s.stage_id,
@@ -427,16 +402,13 @@ pub fn detect_task_failures(
                     s.num_tasks, s.num_failed_tasks, s.num_killed_tasks, s.num_complete_tasks
                 ),
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
+            // Estimate: failed tasks add ~failure_rate% overhead via retries
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * failure_rate) as i64;
             suspect.recommendation = Some(
-                "Check executor logs. Common causes: OOM, data corruption, fetch failures."
+                "Check executor logs for OOM/fetch failures. Try: spark.conf.set('spark.executor.memory', '8g') and spark.conf.set('spark.task.maxFailures', '4')."
                     .to_string(),
             );
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
             suspect
         })
         .collect()
@@ -444,24 +416,16 @@ pub fn detect_task_failures(
 
 /// Detect memory pressure: memory_bytes_spilled > 50MB but disk_bytes_spilled == 0.
 /// This is a proactive warning before disk spill happens.
-pub fn detect_memory_pressure(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect> {
+pub fn detect_memory_pressure(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
     stages
         .iter()
         .filter(|s| s.memory_bytes_spilled > FIFTY_MB && s.disk_bytes_spilled == 0)
         .map(|s| {
-            let (sql_id, sql_description) =
-                resolve_sql(s.stage_id, stage_to_job, job_to_sql, sql_descriptions);
             let mut suspect = Suspect::new(
                 Severity::Warning,
                 SuspectCategory::MemoryPressure,
                 s.stage_id,
-                stage_to_job.get(&s.stage_id).copied(),
+                ctx.job_id(s.stage_id),
                 format!(
                     "Stage {} memory spill {} (no disk spill yet)",
                     s.stage_id,
@@ -472,24 +436,268 @@ pub fn detect_memory_pressure(
                     format_bytes(s.memory_bytes_spilled)
                 ),
             );
-            suspect.stage_name = Some(s.name.clone());
-            suspect.sql_id = sql_id;
-            suspect.sql_description = sql_description;
-            suspect.io_summary = Some(stage_io_summary(s));
+            ctx.enrich(&mut suspect, s);
+            // ~10% overhead from memory pressure (GC pauses)
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.1) as i64;
             suspect.recommendation = Some(
-                "Increase spark.executor.memory or spark.executor.memoryOverhead, reduce partition size."
+                "spark.conf.set('spark.executor.memory', '8g') and spark.conf.set('spark.executor.memoryOverhead', '2g'). Reduce partition size with df.repartition(N)."
                     .to_string(),
             );
-            suspect.sql_plan_hint =
-                resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
             suspect
         })
         .collect()
 }
 
-/// Aggregate all suspects and sort by severity (Critical first).
+/// Detect partition count issues: too many small partitions or too few large ones.
+pub fn detect_partition_count(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
+    stages
+        .iter()
+        .filter(|s| s.status == StageStatus::Complete && s.num_tasks > 0)
+        .filter_map(|s| {
+            let total_bytes = s.input_bytes + s.shuffle_read_bytes;
+            if total_bytes == 0 || s.num_tasks == 0 {
+                return None;
+            }
+            let avg_bytes_per_task = total_bytes / s.num_tasks;
+
+            if s.num_tasks > 10_000 && avg_bytes_per_task < ONE_MB {
+                // Too many tiny partitions
+                let target = (total_bytes / (128 * ONE_MB)).max(1);
+                let mut suspect = Suspect::new(
+                    Severity::Warning,
+                    SuspectCategory::TooManyPartitions,
+                    s.stage_id,
+                    ctx.job_id(s.stage_id),
+                    format!(
+                        "Stage {} has {} tasks with only {}/task avg",
+                        s.stage_id,
+                        s.num_tasks,
+                        format_bytes(avg_bytes_per_task)
+                    ),
+                    format!(
+                        "Total data: {}, {} tasks × {} avg",
+                        format_bytes(total_bytes),
+                        s.num_tasks,
+                        format_bytes(avg_bytes_per_task)
+                    ),
+                );
+                ctx.enrich(&mut suspect, s);
+                suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.4) as i64;
+                suspect.recommendation = Some(format!(
+                    "Too many small partitions. Try: df.coalesce({}) to target ~128MB/partition.",
+                    target
+                ));
+                Some(suspect)
+            } else if s.num_tasks <= 8 && avg_bytes_per_task > ONE_GB {
+                // Too few large partitions
+                let target = (total_bytes / (128 * ONE_MB)).max(8);
+                let mut suspect = Suspect::new(
+                    Severity::Warning,
+                    SuspectCategory::TooFewPartitions,
+                    s.stage_id,
+                    ctx.job_id(s.stage_id),
+                    format!(
+                        "Stage {} has only {} tasks with {}/task avg",
+                        s.stage_id,
+                        s.num_tasks,
+                        format_bytes(avg_bytes_per_task)
+                    ),
+                    format!(
+                        "Total data: {}, {} tasks × {} avg",
+                        format_bytes(total_bytes),
+                        s.num_tasks,
+                        format_bytes(avg_bytes_per_task)
+                    ),
+                );
+                ctx.enrich(&mut suspect, s);
+                suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.5) as i64;
+                suspect.recommendation = Some(format!(
+                    "Too few partitions causing stragglers. Try: df.repartition({}) to target ~128MB/partition.",
+                    target
+                ));
+                Some(suspect)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Detect broadcast join opportunities: SortMergeJoin/ShuffledHashJoin with one small side (<100MB).
+pub fn detect_broadcast_join(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
+    stages
+        .iter()
+        .filter(|s| {
+            s.status == StageStatus::Complete
+                && s.shuffle_write_bytes > 0
+                && s.shuffle_write_bytes < ONE_HUNDRED_MB
+                && s.executor_run_time > 5_000
+        })
+        .filter_map(|s| {
+            // Check if the SQL plan contains join indicators
+            let plan_hint = ctx.resolve_plan_hint_for(s.stage_id);
+            let has_join_indicator = plan_hint
+                .as_ref()
+                .is_some_and(|h| {
+                    h.contains("SortMerge") || h.contains("ShuffledHash") || h.contains("Join")
+                });
+            if !has_join_indicator {
+                return None;
+            }
+
+            let mut suspect = Suspect::new(
+                Severity::Warning,
+                SuspectCategory::BroadcastJoinOpportunity,
+                s.stage_id,
+                ctx.job_id(s.stage_id),
+                format!(
+                    "Stage {} shuffles only {} — broadcast join candidate",
+                    s.stage_id,
+                    format_bytes(s.shuffle_write_bytes)
+                ),
+                format!(
+                    "Shuffle write: {} < 100MB threshold. A broadcast join would eliminate this shuffle.",
+                    format_bytes(s.shuffle_write_bytes)
+                ),
+            );
+            ctx.enrich(&mut suspect, s);
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.6) as i64;
+            suspect.recommendation = Some(
+                "from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), on='key'). Eliminates shuffle for the small side."
+                    .to_string(),
+            );
+            Some(suspect)
+        })
+        .collect()
+}
+
+/// Detect Python UDFs in SQL plans (ArrowEvalPython, BatchEvalPython, PythonUDF, PythonRunner).
+pub fn detect_python_udf(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
+    const PYTHON_MARKERS: &[&str] = &[
+        "ArrowEvalPython",
+        "BatchEvalPython",
+        "PythonUDF",
+        "PythonRunner",
+    ];
+
+    stages
+        .iter()
+        .filter(|s| s.status == StageStatus::Complete && s.executor_run_time > 5_000)
+        .filter_map(|s| {
+            let hint = ctx.resolve_plan_hint_for(s.stage_id)?;
+            let has_python = PYTHON_MARKERS.iter().any(|m| hint.contains(m));
+            if !has_python {
+                return None;
+            }
+
+            // Check if also CPU-bound → Critical
+            let cpu_ms = s.executor_cpu_time / 1_000_000;
+            let ratio = if s.executor_run_time > 0 {
+                cpu_ms as f64 / s.executor_run_time as f64
+            } else {
+                0.0
+            };
+            let severity = if ratio > 0.9 && s.executor_run_time > 30_000 {
+                Severity::Critical
+            } else {
+                Severity::Warning
+            };
+
+            let mut suspect = Suspect::new(
+                severity,
+                SuspectCategory::PythonUdf,
+                s.stage_id,
+                ctx.job_id(s.stage_id),
+                format!(
+                    "Stage {} uses Python UDF ({})",
+                    s.stage_id,
+                    format_duration_ms(s.executor_run_time)
+                ),
+                format!(
+                    "Python UDF detected in SQL plan. CPU utilization: {:.0}%",
+                    ratio * 100.0
+                ),
+            );
+            ctx.enrich(&mut suspect, s);
+            suspect.estimated_savings_ms = (s.executor_run_time as f64 * 0.5) as i64;
+            suspect.recommendation = Some(
+                "Replace @udf with @pandas_udf for vectorized execution, or use native F.when()/F.expr() functions. Python UDFs serialize data row-by-row."
+                    .to_string(),
+            );
+            Some(suspect)
+        })
+        .collect()
+}
+
+/// Detect repeated computations that could benefit from caching.
+/// Groups completed stages by cleaned name; if >=2 share a name and total runtime > 30s → CacheOpportunity.
+pub fn detect_cache_opportunity(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect> {
+    use crate::util::format::clean_stage_name;
+
+    let completed: Vec<&SparkStage> = stages
+        .iter()
+        .filter(|s| s.status == StageStatus::Complete && s.executor_run_time > 0)
+        .collect();
+
+    // Group by cleaned stage name
+    let mut name_groups: HashMap<String, Vec<&SparkStage>> = HashMap::new();
+    for s in &completed {
+        let clean = clean_stage_name(&s.name).to_string();
+        name_groups.entry(clean).or_default().push(s);
+    }
+
+    let mut suspects = Vec::new();
+    for (name, group) in &name_groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let total_runtime: i64 = group.iter().map(|s| s.executor_run_time).sum();
+        if total_runtime <= 30_000 {
+            continue;
+        }
+
+        // Report on the slowest stage in the group
+        let slowest = group.iter().max_by_key(|s| s.executor_run_time).unwrap();
+        let mut suspect = Suspect::new(
+            Severity::Warning,
+            SuspectCategory::CacheOpportunity,
+            slowest.stage_id,
+            ctx.job_id(slowest.stage_id),
+            format!(
+                "'{}' repeated {} times (total: {})",
+                crate::util::format::truncate(name, 40),
+                group.len(),
+                format_duration_ms(total_runtime)
+            ),
+            format!(
+                "{} stages share name '{}'. Total runtime: {}. Caching could eliminate {} re-computations.",
+                group.len(),
+                crate::util::format::truncate(name, 30),
+                format_duration_ms(total_runtime),
+                group.len() - 1
+            ),
+        );
+        ctx.enrich(&mut suspect, slowest);
+        // Savings = total runtime minus one execution (you still need it once)
+        let min_runtime = group.iter().map(|s| s.executor_run_time).min().unwrap_or(0);
+        suspect.estimated_savings_ms = total_runtime - min_runtime;
+        suspect.recommendation = Some(
+            "df.cache() or df.persist(StorageLevel.MEMORY_AND_DISK) before the first action. Unpersist when no longer needed: df.unpersist()."
+                .to_string(),
+        );
+        suspects.push(suspect);
+    }
+
+    suspects
+}
+
+/// Aggregate all suspects and sort by severity (Critical first), then by estimated savings descending.
 pub fn aggregate_suspects(mut suspects: Vec<Suspect>) -> Vec<Suspect> {
-    suspects.sort_by(|a, b| b.severity.cmp(&a.severity));
+    suspects.sort_by(|a, b| {
+        b.severity
+            .cmp(&a.severity)
+            .then_with(|| b.estimated_savings_ms.cmp(&a.estimated_savings_ms))
+    });
     suspects
 }
 
@@ -528,17 +736,20 @@ mod tests {
         }
     }
 
+    fn empty_ctx() -> SuspectContext<'static> {
+        // Leak empty HashMaps for test convenience — tiny, static lifetime
+        let s2j: &'static HashMap<i64, i64> = Box::leak(Box::default());
+        let j2s: &'static HashMap<i64, i64> = Box::leak(Box::default());
+        let desc: &'static HashMap<i64, String> = Box::leak(Box::default());
+        let plans: &'static HashMap<i64, String> = Box::leak(Box::default());
+        SuspectContext::new(s2j, j2s, desc, plans)
+    }
+
     #[test]
     fn test_no_slow_stages_uniform() {
         let stages: Vec<SparkStage> = (0..10).map(|i| make_stage(i, 1000, 0)).collect();
-        let map = HashMap::new();
-        let suspects = detect_slow_stages(
-            &stages,
-            &map,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_slow_stages(&stages, &ctx);
         assert!(suspects.is_empty());
     }
 
@@ -546,14 +757,8 @@ mod tests {
     fn test_slow_stage_detected() {
         let mut stages: Vec<SparkStage> = (0..9).map(|i| make_stage(i, 1000, 0)).collect();
         stages.push(make_stage(9, 100000, 0));
-        let map = HashMap::new();
-        let suspects = detect_slow_stages(
-            &stages,
-            &map,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_slow_stages(&stages, &ctx);
         assert!(!suspects.is_empty());
         assert_eq!(suspects[0].stage_id, 9);
         assert!(suspects[0].stage_name.is_some());
@@ -563,14 +768,8 @@ mod tests {
     #[test]
     fn test_spill_detected() {
         let stages = vec![make_stage(0, 1000, 500_000_000)];
-        let map = HashMap::new();
-        let suspects = detect_spill(
-            &stages,
-            &map,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_spill(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].severity, Severity::Warning);
         assert!(suspects[0].recommendation.is_some());
@@ -579,14 +778,8 @@ mod tests {
     #[test]
     fn test_critical_spill() {
         let stages = vec![make_stage(0, 1000, 2_000_000_000)];
-        let map = HashMap::new();
-        let suspects = detect_spill(
-            &stages,
-            &map,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_spill(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].severity, Severity::Critical);
     }
@@ -692,13 +885,8 @@ mod tests {
         let mut stage = make_stage(0, 30_000, 0);
         stage.executor_cpu_time = 3_000 * 1_000_000; // 3s in ns, runtime is 30s
         let stages = vec![stage];
-        let suspects = detect_cpu_efficiency(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_cpu_efficiency(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].category, SuspectCategory::IoBottleneck);
     }
@@ -709,13 +897,8 @@ mod tests {
         let mut stage = make_stage(0, 50_000, 0);
         stage.executor_cpu_time = 48_000 * 1_000_000; // 48s in ns, runtime is 50s
         let stages = vec![stage];
-        let suspects = detect_cpu_efficiency(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_cpu_efficiency(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].category, SuspectCategory::CpuBottleneck);
     }
@@ -726,13 +909,8 @@ mod tests {
         let mut stage = make_stage(0, 30_000, 0);
         stage.executor_cpu_time = 15_000 * 1_000_000; // 15s in ns
         let stages = vec![stage];
-        let suspects = detect_cpu_efficiency(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_cpu_efficiency(&stages, &ctx);
         assert!(suspects.is_empty());
     }
 
@@ -742,13 +920,8 @@ mod tests {
         stage.input_records = 10_000;
         stage.output_records = 200_000; // 20x
         let stages = vec![stage];
-        let suspects = detect_record_explosion(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_record_explosion(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].category, SuspectCategory::RecordExplosion);
     }
@@ -759,13 +932,8 @@ mod tests {
         stage.input_records = 5; // too few
         stage.output_records = 500;
         let stages = vec![stage];
-        let suspects = detect_record_explosion(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_record_explosion(&stages, &ctx);
         assert!(suspects.is_empty());
     }
 
@@ -775,13 +943,8 @@ mod tests {
         stage.num_tasks = 100;
         stage.num_failed_tasks = 2; // 2% failure rate → Warning
         let stages = vec![stage];
-        let suspects = detect_task_failures(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_task_failures(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].category, SuspectCategory::TaskFailures);
         assert_eq!(suspects[0].severity, Severity::Warning);
@@ -792,13 +955,8 @@ mod tests {
         let mut stage = make_stage(0, 1000, 0);
         stage.num_failed_tasks = 15; // > 10 → critical
         let stages = vec![stage];
-        let suspects = detect_task_failures(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_task_failures(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].severity, Severity::Critical);
     }
@@ -809,13 +967,8 @@ mod tests {
         stage.memory_bytes_spilled = 100_000_000; // 100 MB
         stage.disk_bytes_spilled = 0;
         let stages = vec![stage];
-        let suspects = detect_memory_pressure(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_memory_pressure(&stages, &ctx);
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].category, SuspectCategory::MemoryPressure);
     }
@@ -826,13 +979,8 @@ mod tests {
         // disk_bytes_spilled > 0, so memory pressure shouldn't fire
         stage.memory_bytes_spilled = 100_000_000;
         let stages = vec![stage];
-        let suspects = detect_memory_pressure(
-            &stages,
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let ctx = empty_ctx();
+        let suspects = detect_memory_pressure(&stages, &ctx);
         assert!(suspects.is_empty());
     }
 }

@@ -48,6 +48,15 @@ pub fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Format bytes into a human-readable size string, or "-" if zero.
+pub fn format_bytes_or_dash(bytes: i64) -> String {
+    if bytes > 0 {
+        format_bytes(bytes)
+    } else {
+        "-".to_string()
+    }
+}
+
 /// Format a record count into a human-readable string.
 pub fn format_records(records: i64) -> String {
     if records < 0 {
@@ -96,6 +105,18 @@ pub fn truncate(s: &str, max_len: usize) -> String {
         result.push_str("...");
         result
     }
+}
+
+/// Replace embedded newlines, carriage returns, and tabs with spaces.
+/// Ratatui's `Line`/`Span` types expect no embedded newlines — they corrupt
+/// the differential renderer's cursor position tracking.
+pub fn sanitize_for_span(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            _ => c,
+        })
+        .collect()
 }
 
 /// Strip the noisy "Spark Connect - session_id: ..." prefix from stage names.
@@ -279,5 +300,13 @@ AdaptiveSparkPlan (65)
         let values: Vec<f64> = (1..=100).map(|i| i as f64).collect();
         let p90 = percentile(&values, 0.9);
         assert!((p90 - 90.1).abs() < 0.5); // approximately 90
+    }
+
+    #[test]
+    fn test_sanitize_for_span() {
+        assert_eq!(sanitize_for_span("hello\nworld"), "hello world");
+        assert_eq!(sanitize_for_span("foo\r\nbar"), "foo  bar");
+        assert_eq!(sanitize_for_span("tab\there"), "tab here");
+        assert_eq!(sanitize_for_span("clean"), "clean");
     }
 }
