@@ -9,8 +9,11 @@ use crate::analyze::skew::detect_skew;
 use crate::analyze::sql_linker::{
     build_job_to_sql_map, build_stage_to_job_map, find_sql_for_job, stages_for_task_analysis,
 };
-use crate::analyze::suspects::{aggregate_suspects, detect_slow_stages, detect_spill};
-use crate::analyze::types::RankedJob;
+use crate::analyze::suspects::{
+    aggregate_suspects, detect_cpu_efficiency, detect_memory_pressure, detect_record_explosion,
+    detect_slow_stages, detect_spill, detect_task_failures,
+};
+use crate::analyze::types::{HealthSummary, RankedJob, Severity};
 use crate::fetch::client::SparkHttpClient;
 use crate::tui::{Action, DataPayload};
 use crate::util::time::duration_between;
@@ -137,9 +140,38 @@ async fn poll_once(
         &sql_descriptions,
         &sql_plans,
     ));
+    all_suspects.extend(detect_cpu_efficiency(
+        &stages,
+        &stage_to_job,
+        &job_to_sql,
+        &sql_descriptions,
+        &sql_plans,
+    ));
+    all_suspects.extend(detect_record_explosion(
+        &stages,
+        &stage_to_job,
+        &job_to_sql,
+        &sql_descriptions,
+        &sql_plans,
+    ));
+    all_suspects.extend(detect_task_failures(
+        &stages,
+        &stage_to_job,
+        &job_to_sql,
+        &sql_descriptions,
+        &sql_plans,
+    ));
+    all_suspects.extend(detect_memory_pressure(
+        &stages,
+        &stage_to_job,
+        &job_to_sql,
+        &sql_descriptions,
+        &sql_plans,
+    ));
 
     // Fetch task lists for stages selected by heuristic analysis
     let top_stages = stages_for_task_analysis(&stages);
+    let mut stage_tasks: HashMap<i64, Vec<crate::fetch::types::SparkTask>> = HashMap::new();
     for (stage_id, attempt_id) in &top_stages {
         match client.get_task_list(app_id, *stage_id, *attempt_id).await {
             Ok(tasks) => {
@@ -147,26 +179,30 @@ async fn poll_once(
                 let sname = stage_names.get(stage_id).copied();
                 let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
                 let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid));
-                if let Some(mut suspect) = detect_skew(
+                let mut skew_suspects = detect_skew(
                     &tasks,
                     *stage_id,
                     job_id,
                     sname,
                     sql_id,
                     sql_desc.map(|s| s.as_str()),
-                ) {
-                    // Enrich with sql_plan_hint
-                    #[allow(clippy::collapsible_if)]
-                    if let Some(sid) = sql_id {
-                        if let Some(plan) = sql_plans.get(&sid) {
-                            let ops = crate::util::format::parse_plan_top_operations(plan, 3);
-                            if !ops.is_empty() {
-                                suspect.sql_plan_hint = Some(ops.join(" → "));
+                );
+                // Enrich with sql_plan_hint
+                #[allow(clippy::collapsible_if)]
+                if let Some(sid) = sql_id {
+                    if let Some(plan) = sql_plans.get(&sid) {
+                        let ops = crate::util::format::parse_plan_top_operations(plan, 3);
+                        if !ops.is_empty() {
+                            let hint = ops.join(" → ");
+                            for suspect in &mut skew_suspects {
+                                suspect.sql_plan_hint = Some(hint.clone());
                             }
                         }
                     }
-                    all_suspects.push(suspect);
                 }
+                all_suspects.extend(skew_suspects);
+                // Persist tasks for UI stage detail view
+                stage_tasks.insert(*stage_id, tasks);
             }
             Err(e) => {
                 warn!(
@@ -178,6 +214,10 @@ async fn poll_once(
     }
 
     let suspects = aggregate_suspects(all_suspects);
+
+    // Compute health summary
+    let summary = compute_health_summary(&ranked_jobs, &stages, &suspects);
+
     let now = chrono::Utc::now().format("%H:%M:%S").to_string();
 
     Ok(DataPayload {
@@ -186,6 +226,54 @@ async fn poll_once(
         stages,
         sql_executions,
         suspects,
+        stage_tasks: std::sync::Arc::new(stage_tasks),
+        summary,
         last_updated: now,
     })
+}
+
+fn compute_health_summary(
+    jobs: &[RankedJob],
+    stages: &[crate::fetch::types::SparkStage],
+    suspects: &[crate::analyze::types::Suspect],
+) -> HealthSummary {
+    let total_jobs = jobs.len();
+    let running_jobs = jobs.iter().filter(|j| j.status == "RUNNING").count();
+    let failed_jobs = jobs.iter().filter(|j| j.status == "FAILED").count();
+
+    let total_input_bytes: i64 = stages.iter().map(|s| s.input_bytes).sum();
+    let total_output_bytes: i64 = stages.iter().map(|s| s.output_bytes).sum();
+    let total_shuffle_bytes: i64 = stages
+        .iter()
+        .map(|s| s.shuffle_read_bytes + s.shuffle_write_bytes)
+        .sum();
+
+    let critical_count = suspects
+        .iter()
+        .filter(|s| s.severity == Severity::Critical)
+        .count();
+    let warning_count = suspects
+        .iter()
+        .filter(|s| s.severity == Severity::Warning)
+        .count();
+
+    // Top 3 critical issues for the summary line
+    let top_issues: Vec<String> = suspects
+        .iter()
+        .filter(|s| s.severity == Severity::Critical)
+        .take(3)
+        .map(|s| format!("{} in stage {}", s.category, s.stage_id))
+        .collect();
+
+    HealthSummary {
+        total_jobs,
+        running_jobs,
+        failed_jobs,
+        total_input_bytes,
+        total_output_bytes,
+        total_shuffle_bytes,
+        critical_count,
+        warning_count,
+        top_issues,
+    }
 }

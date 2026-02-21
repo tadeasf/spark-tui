@@ -47,6 +47,9 @@ pub fn render_suspects_tab(
                 Some(BottleneckPattern::DataExplosion) => {
                     ("Data Explosion".to_string(), theme::critical())
                 }
+                Some(BottleneckPattern::RecordExplosion) => {
+                    ("Rec Explosion".to_string(), theme::critical())
+                }
                 None => ("-".to_string(), theme::muted()),
             };
 
@@ -116,9 +119,9 @@ pub fn render_suspects_tab(
         if let Some(pattern) = &s.bottleneck {
             let pattern_style = match pattern {
                 BottleneckPattern::LargeScan => theme::warning(),
-                BottleneckPattern::WideShuffle | BottleneckPattern::DataExplosion => {
-                    theme::critical()
-                }
+                BottleneckPattern::WideShuffle
+                | BottleneckPattern::DataExplosion
+                | BottleneckPattern::RecordExplosion => theme::critical(),
             };
             lines.push(Line::from(vec![
                 Span::styled("Pattern: ", theme::tab_active()),

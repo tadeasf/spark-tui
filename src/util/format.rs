@@ -48,6 +48,43 @@ pub fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Format a record count into a human-readable string.
+pub fn format_records(records: i64) -> String {
+    if records < 0 {
+        return "N/A".to_string();
+    }
+    let r = records as f64;
+    if r < 1_000.0 {
+        format!("{}", records)
+    } else if r < 1_000_000.0 {
+        format!("{:.1}K", r / 1_000.0)
+    } else if r < 1_000_000_000.0 {
+        format!("{:.1}M", r / 1_000_000.0)
+    } else {
+        format!("{:.1}B", r / 1_000_000_000.0)
+    }
+}
+
+/// Compute a percentile from a sorted slice of f64 values.
+/// `p` should be between 0.0 and 1.0 (e.g. 0.5 for median, 0.9 for p90).
+pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let idx = p * (sorted.len() - 1) as f64;
+    let lower = idx.floor() as usize;
+    let upper = idx.ceil() as usize;
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let frac = idx - lower as f64;
+        sorted[lower] * (1.0 - frac) + sorted[upper] * frac
+    }
+}
+
 /// Truncate a string to the given max length, appending "..." if truncated.
 pub fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -207,5 +244,40 @@ AdaptiveSparkPlan (65)
     #[test]
     fn test_parse_plan_empty() {
         assert!(parse_plan_top_operations("", 3).is_empty());
+    }
+
+    #[test]
+    fn test_format_records() {
+        assert_eq!(format_records(0), "0");
+        assert_eq!(format_records(999), "999");
+        assert_eq!(format_records(1500), "1.5K");
+        assert_eq!(format_records(1_500_000), "1.5M");
+        assert_eq!(format_records(2_500_000_000), "2.5B");
+        assert_eq!(format_records(-1), "N/A");
+    }
+
+    #[test]
+    fn test_percentile_basic() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((percentile(&values, 0.0) - 1.0).abs() < 0.01);
+        assert!((percentile(&values, 0.5) - 3.0).abs() < 0.01);
+        assert!((percentile(&values, 1.0) - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_percentile_empty() {
+        assert_eq!(percentile(&[], 0.5), 0.0);
+    }
+
+    #[test]
+    fn test_percentile_single() {
+        assert_eq!(percentile(&[42.0], 0.5), 42.0);
+    }
+
+    #[test]
+    fn test_percentile_p90() {
+        let values: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+        let p90 = percentile(&values, 0.9);
+        assert!((p90 - 90.1).abs() < 0.5); // approximately 90
     }
 }

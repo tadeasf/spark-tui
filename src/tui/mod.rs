@@ -4,9 +4,12 @@ pub mod tabs;
 pub mod theme;
 pub mod widgets;
 
-use crate::analyze::types::{RankedJob, Suspect};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::analyze::types::{HealthSummary, RankedJob, Suspect};
 use crate::fetch::client::FetchError;
-use crate::fetch::types::{SparkSqlExecution, SparkStage};
+use crate::fetch::types::{SparkSqlExecution, SparkStage, SparkTask};
 use crossterm::event::KeyEvent;
 
 /// All data needed to render the TUI.
@@ -17,6 +20,8 @@ pub struct DataPayload {
     pub stages: Vec<SparkStage>,
     pub sql_executions: Vec<SparkSqlExecution>,
     pub suspects: Vec<Suspect>,
+    pub stage_tasks: Arc<HashMap<i64, Vec<SparkTask>>>,
+    pub summary: HealthSummary,
     pub last_updated: String,
 }
 
