@@ -91,9 +91,12 @@ spark-tui --profile my-workspace
 | `q`                 | Quit                                                         |
 
 ## Screenshots
-<img width="1080" height="1110" alt="image" src="https://github.com/user-attachments/assets/25845362-4af0-4003-85cb-ccb9157abfea" />
-<img width="1080" height="1105" alt="image" src="https://github.com/user-attachments/assets/4cfde96d-b0d4-4f40-b23f-7a21317c83b5" />
-<img width="1080" height="1103" alt="image" src="https://github.com/user-attachments/assets/946e6470-bdf0-4a0d-8dcd-17ec39b83cab" />
+<img width="1225" height="864" alt="image" src="https://github.com/user-attachments/assets/28c0c7a1-722d-47f6-a240-63b0e5ab7798" />
+<img width="1223" height="859" alt="image" src="https://github.com/user-attachments/assets/0bb3d8f3-c1f0-4f90-b026-f6ff55b6e93e" />
+<img width="1221" height="862" alt="image" src="https://github.com/user-attachments/assets/8e41dd1d-92ab-43b9-ab6f-660a8aaf2d6c" />
+<img width="1224" height="858" alt="image" src="https://github.com/user-attachments/assets/cdf5cecf-bd5a-403e-a276-30bd0bc31701" />
+<img width="1221" height="857" alt="image" src="https://github.com/user-attachments/assets/04158c89-aca9-4001-8bf2-142b642d0483" />
+<img width="806" height="623" alt="image" src="https://github.com/user-attachments/assets/c2e68520-493e-46ca-ba55-d38f83f075d2" />
 
 ## Documentation
 
