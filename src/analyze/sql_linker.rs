@@ -113,5 +113,4 @@ mod tests {
         assert_eq!(map.get(&12), Some(&2));
         assert_eq!(map.get(&99), None);
     }
-
 }

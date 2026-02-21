@@ -196,6 +196,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::collapsible_if)]
     fn handle_enter(&mut self) {
         match self.view_mode {
             ViewMode::List => match self.active_tab {
@@ -207,7 +208,6 @@ impl App {
                     }
                 }
                 Tab::Suspects => {
-                    #[allow(clippy::collapsible_if)]
                     if let Some(idx) = self.suspect_table_state.selected() {
                         if let Some(data) = &self.data {
                             if let Some(suspect) = data.suspects.get(idx) {
