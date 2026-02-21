@@ -26,11 +26,12 @@ async fn main() {
     };
 
     // Init tracing to log file (stderr corrupts the TUI)
+    let log_path = std::env::temp_dir().join("spark-tui.log");
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/spark-tui.log")
-        .expect("failed to open /tmp/spark-tui.log");
+        .open(&log_path)
+        .expect("failed to open log file in temp directory");
     let log_file = Mutex::new(log_file);
     tracing_subscriber::fmt()
         .with_env_filter(

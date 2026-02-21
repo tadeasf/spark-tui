@@ -144,6 +144,15 @@ fn missing_fields_error(args: &CliArgs) -> String {
 fn databrickscfg_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| {
+            let drive = std::env::var("HOMEDRIVE").unwrap_or_default();
+            let path = std::env::var("HOMEPATH").unwrap_or_default();
+            if drive.is_empty() || path.is_empty() {
+                Err(std::env::VarError::NotPresent)
+            } else {
+                Ok(format!("{}{}", drive, path))
+            }
+        })
         .ok()?;
     let path = PathBuf::from(home).join(".databrickscfg");
     if path.exists() { Some(path) } else { None }
