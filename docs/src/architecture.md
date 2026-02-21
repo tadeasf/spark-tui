@@ -26,7 +26,8 @@ src/
 │   │   └── suspects.rs  Suspects table view
 │   └── widgets/
 │       ├── bar_chart.rs Duration bar chart for stage comparison
-│       └── status_line.rs Status bar (cluster ID, app ID, last update time)
+│       ├── status_line.rs Status bar (cluster ID, app ID, last update time)
+│       └── summary_bar.rs Health summary bar (job/IO counts, top issues)
 └── util/
     ├── format.rs        format_duration_ms, format_bytes, truncate, clean_stage_name
     └── time.rs          Spark timestamp parsing, duration_between
@@ -55,16 +56,18 @@ src/
 
 2. **HTTP client** (`fetch/client.rs`) — `SparkHttpClient` wraps `reqwest::Client` with the base URL and token. `FetchError` maps HTTP status codes to user-friendly messages
 
-3. **Endpoint methods** (`fetch/spark.rs`) — `discover_app_id`, `get_jobs`, `get_stages`, `get_sql_executions`, `get_task_list` — each calls the Spark REST API and deserializes the response
+3. **Endpoint methods** (`fetch/spark.rs`) — `discover_app_id`, `get_jobs`, `get_stages`, `get_sql_executions`, `get_task_list`, `get_executors` — each calls the Spark REST API and deserializes the response
 
 4. **Background poller** (`fetch/poller.rs`) — `run_poller` runs in a tokio task, calling `poll_once` on each interval. `poll_once`:
-   - Fetches jobs, stages, and SQL executions concurrently via `tokio::join!`
+   - Fetches jobs, stages, SQL executions, and executors concurrently via 4-way `tokio::join!`
+   - Aggregates active executors into `ClusterResources` (total memory, cores, executor count)
    - Builds cross-reference maps (job↔SQL, stage↔job)
-   - Runs analysis (slow stages, spill, skew detection)
-   - Fetches task lists for the top 5 slowest stages
-   - Sends a `DataPayload` through an mpsc channel
+   - Runs analysis (slow stages, spill, CPU efficiency, record explosion, task failures, memory pressure, skew detection)
+   - Fetches task lists for up to ~15 stages (selected by multiple heuristics)
+   - Computes `HealthSummary` for the summary bar
+   - Sends a `DataPayload` (including `cluster_resources`) through an mpsc channel
 
-5. **Analysis** (`analyze/`) — `detect_slow_stages`, `detect_spill`, and `detect_skew` each produce `Vec<Suspect>`. `aggregate_suspects` sorts by severity
+5. **Analysis** (`analyze/`) — `detect_slow_stages`, `detect_spill`, `detect_cpu_efficiency`, `detect_record_explosion`, `detect_task_failures`, `detect_memory_pressure`, and `detect_skew` each produce `Vec<Suspect>`. `aggregate_suspects` sorts by severity
 
 6. **App event loop** (`tui/app.rs`) — `App::run` receives `Action` variants from the mpsc channel:
    - `Action::DataUpdate(payload)` — stores the new data
@@ -72,7 +75,7 @@ src/
    - `Action::Key(event)` — processes keybindings
    - `Action::Resize(w, h)` — triggers re-render
 
-7. **Rendering** (`tui/tabs/`, `tui/widgets/`) — renders the current view mode (List, JobDetail, SqlDetail) using ratatui widgets
+7. **Rendering** (`tui/tabs/`, `tui/widgets/`) — renders the current view mode (List, JobDetail, StageDetail, SqlDetail) using ratatui widgets. The summary bar widget displays health metrics in List view
 
 ## Async Model
 
@@ -88,8 +91,8 @@ All tasks communicate through a single `mpsc::UnboundedSender<Action>` channel. 
 
 ## Design Decisions
 
-- **Bounded task fetching**: Task lists (per-task metrics) are only fetched for the top 5 slowest stages to avoid overwhelming the API
-- **Concurrent fetches**: Jobs, stages, and SQL executions are fetched in parallel with `tokio::join!` to minimize latency
+- **Bounded task fetching**: Task lists (per-task metrics) are fetched for up to ~15 stages selected by multiple heuristics (top-by-runtime, top-by-shuffle, high-parallelism). On-demand task fetching is triggered when entering StageDetail for stages not already analyzed
+- **Concurrent fetches**: Jobs, stages, SQL executions, and executors are fetched in parallel with 4-way `tokio::join!` to minimize latency
 - **Log file**: Logs go to `/tmp/spark-tui.log` instead of stderr to avoid corrupting the TUI
 - **Panic hook**: A custom panic hook restores the terminal before printing the panic message, preventing terminal corruption
 - **Edition 2024**: Uses the latest Rust edition for modern language features

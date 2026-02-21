@@ -32,7 +32,15 @@ Implements `Ord` for sorting (Critical > Warning).
 pub enum SuspectCategory {
     SlowStage,
     DataSkew,
+    DataSizeSkew,
+    RecordCountSkew,
     DiskSpill,
+    CpuBottleneck,
+    IoBottleneck,
+    RecordExplosion,
+    TaskFailures,
+    MemoryPressure,
+    ExecutorHotspot,
 }
 ```
 
@@ -43,6 +51,7 @@ pub enum BottleneckPattern {
     LargeScan,
     WideShuffle,
     DataExplosion,
+    RecordExplosion,
 }
 ```
 
@@ -86,6 +95,24 @@ pub struct RankedJob {
 }
 ```
 
+### `HealthSummary`
+
+```rust
+pub struct HealthSummary {
+    pub total_jobs: usize,
+    pub running_jobs: usize,
+    pub failed_jobs: usize,
+    pub total_input_bytes: i64,
+    pub total_output_bytes: i64,
+    pub total_shuffle_bytes: i64,
+    pub critical_count: usize,
+    pub warning_count: usize,
+    pub top_issues: Vec<String>,
+}
+```
+
+Aggregates health metrics for the summary bar widget, computed by `compute_health_summary` in the poller.
+
 ## `skew.rs` — Skew Detection
 
 ### `detect_skew`
@@ -98,10 +125,10 @@ pub fn detect_skew(
     stage_name: Option<&str>,
     sql_id: Option<i64>,
     sql_description: Option<&str>,
-) -> Option<Suspect>
+) -> Vec<Suspect>
 ```
 
-Computes coefficient of variation (CV) and max/median ratio across task durations. Returns a `Suspect` if thresholds are exceeded. See [Understanding Analysis](../analysis-guide.md) for threshold details.
+Detects all forms of skew in a stage's tasks. Returns a `Vec<Suspect>` covering duration skew, data-size skew, record-count skew, and executor hotspot detection. See [Understanding Analysis](../analysis-guide.md) for threshold details.
 
 ## `suspects.rs` — Stage-Level Detection
 
@@ -132,6 +159,62 @@ pub fn detect_spill(
 ```
 
 Flags stages with `disk_bytes_spilled > 0` (warning) or `> 1 GB` (critical).
+
+### `detect_cpu_efficiency`
+
+```rust
+pub fn detect_cpu_efficiency(
+    stages: &[SparkStage],
+    stage_to_job: &HashMap<i64, i64>,
+    job_to_sql: &HashMap<i64, i64>,
+    sql_descriptions: &HashMap<i64, String>,
+    sql_plans: &HashMap<i64, String>,
+) -> Vec<Suspect>
+```
+
+Detects CPU efficiency issues. Computes `cpu_ratio = (executor_cpu_time / 1_000_000) / executor_run_time`. Low ratio (< 0.3, runtime > 10s) → I/O bottleneck; high ratio (> 0.9, runtime > 30s) → CPU saturated.
+
+### `detect_record_explosion`
+
+```rust
+pub fn detect_record_explosion(
+    stages: &[SparkStage],
+    stage_to_job: &HashMap<i64, i64>,
+    job_to_sql: &HashMap<i64, i64>,
+    sql_descriptions: &HashMap<i64, String>,
+    sql_plans: &HashMap<i64, String>,
+) -> Vec<Suspect>
+```
+
+Detects stages where `output_records > 10x input_records` (with `input_records > 1000`).
+
+### `detect_task_failures`
+
+```rust
+pub fn detect_task_failures(
+    stages: &[SparkStage],
+    stage_to_job: &HashMap<i64, i64>,
+    job_to_sql: &HashMap<i64, i64>,
+    sql_descriptions: &HashMap<i64, String>,
+    sql_plans: &HashMap<i64, String>,
+) -> Vec<Suspect>
+```
+
+Detects stages with task failures or killed tasks.
+
+### `detect_memory_pressure`
+
+```rust
+pub fn detect_memory_pressure(
+    stages: &[SparkStage],
+    stage_to_job: &HashMap<i64, i64>,
+    job_to_sql: &HashMap<i64, i64>,
+    sql_descriptions: &HashMap<i64, String>,
+    sql_plans: &HashMap<i64, String>,
+) -> Vec<Suspect>
+```
+
+Detects memory pressure: `memory_bytes_spilled > 50 MB` but `disk_bytes_spilled == 0`. This is a proactive warning before disk spill happens.
 
 ### `classify_bottleneck`
 
@@ -172,4 +255,4 @@ Sorts suspects by severity (Critical first).
 | `build_stage_to_job_map` | `(jobs) -> HashMap<i64, i64>` | Maps stage_id → job_id from job stage lists |
 | `link_sql_to_jobs` | `(sqls) -> Vec<SqlJobLink>` | Groups SQL executions with their job IDs |
 | `find_sql_for_job` | `(job_id, ...) -> (Option<i64>, Option<String>)` | Looks up SQL ID and description for a job |
-| `stages_for_task_analysis` | `(stages) -> Vec<(i64, i32)>` | Returns top 5 slowest stages for task-level analysis |
+| `stages_for_task_analysis` | `(stages) -> Vec<(i64, i64)>` | Selects up to ~15 stages for task-level analysis using multiple heuristics (top-by-runtime, top-by-shuffle, high-parallelism) |
