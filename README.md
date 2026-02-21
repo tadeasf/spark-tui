@@ -85,8 +85,9 @@ spark-tui --profile my-workspace
 | `q`                 | Quit                                  |
 
 ## Screenshots
-
-<!-- TODO: Add terminal screenshots -->
+<img width="1080" height="1110" alt="image" src="https://github.com/user-attachments/assets/25845362-4af0-4003-85cb-ccb9157abfea" />
+<img width="1080" height="1105" alt="image" src="https://github.com/user-attachments/assets/4cfde96d-b0d4-4f40-b23f-7a21317c83b5" />
+<img width="1080" height="1103" alt="image" src="https://github.com/user-attachments/assets/946e6470-bdf0-4a0d-8dcd-17ec39b83cab" />
 
 ## Documentation
 
