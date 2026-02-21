@@ -1,10 +1,10 @@
 use crossterm::event::KeyCode;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::Modifier,
     text::{Line, Span},
     widgets::{Block, Borders, TableState, Tabs},
-    Frame,
 };
 use tokio::sync::mpsc;
 
@@ -90,18 +90,14 @@ impl App {
                 self.error_msg = None;
 
                 // Preserve selection across refresh
-                if self.view_mode == ViewMode::JobDetail
-                    || self.view_mode == ViewMode::SqlDetail
-                {
+                if self.view_mode == ViewMode::JobDetail || self.view_mode == ViewMode::SqlDetail {
                     if let Some(old_data) = &self.data {
                         if let Some(sel_idx) = self.job_table_state.selected() {
                             if let Some(old_job) = old_data.jobs.get(sel_idx) {
                                 let old_job_id = old_job.job_id;
                                 // Find the same job in the new data
-                                if let Some(new_idx) = payload
-                                    .jobs
-                                    .iter()
-                                    .position(|j| j.job_id == old_job_id)
+                                if let Some(new_idx) =
+                                    payload.jobs.iter().position(|j| j.job_id == old_job_id)
                                 {
                                     self.job_table_state.select(Some(new_idx));
                                 } else {
@@ -257,7 +253,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // tab bar
-                Constraint::Fill(1),  // content area
+                Constraint::Fill(1),   // content area
                 Constraint::Length(1), // status bar
             ])
             .split(f.area());
@@ -293,12 +289,7 @@ impl App {
             Some(data) => match self.view_mode {
                 ViewMode::List => match self.active_tab {
                     Tab::Jobs => {
-                        jobs::render_jobs_tab(
-                            f,
-                            area,
-                            &data.jobs,
-                            &mut self.job_table_state,
-                        );
+                        jobs::render_jobs_tab(f, area, &data.jobs, &mut self.job_table_state);
                     }
                     Tab::Suspects => {
                         suspects::render_suspects_tab(

@@ -158,8 +158,7 @@ async fn poll_once(
                     // Enrich with sql_plan_hint
                     if let Some(sid) = sql_id {
                         if let Some(plan) = sql_plans.get(&sid) {
-                            let ops =
-                                crate::util::format::parse_plan_top_operations(plan, 3);
+                            let ops = crate::util::format::parse_plan_top_operations(plan, 3);
                             if !ops.is_empty() {
                                 suspect.sql_plan_hint = Some(ops.join(" → "));
                             }

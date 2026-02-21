@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
-    Frame,
 };
 
 use crate::analyze::types::RankedJob;
@@ -17,12 +17,7 @@ fn format_submission_time(ts: Option<&str>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-pub fn render_jobs_tab(
-    f: &mut Frame,
-    area: Rect,
-    jobs: &[RankedJob],
-    state: &mut TableState,
-) {
+pub fn render_jobs_tab(f: &mut Frame, area: Rect, jobs: &[RankedJob], state: &mut TableState) {
     let header_cells = [
         "ID", "Status", "Started", "Duration", "Tasks", "Failed", "SQL", "Name",
     ]
@@ -74,7 +69,7 @@ pub fn render_jobs_tab(
         Constraint::Length(8),  // Tasks
         Constraint::Length(7),  // Failed
         Constraint::Length(6),  // SQL
-        Constraint::Fill(1),   // Name
+        Constraint::Fill(1),    // Name
     ];
 
     let table = Table::new(rows, widths)
@@ -116,23 +111,23 @@ pub fn render_job_detail(
     let sql_height = if has_sql { 5 } else { 0 };
 
     let layout = Layout::vertical([
-        Constraint::Length(3),              // Header
-        Constraint::Length(sql_height),     // SQL section (0 if absent)
-        Constraint::Fill(1),               // Stages table
+        Constraint::Length(3),          // Header
+        Constraint::Length(sql_height), // SQL section (0 if absent)
+        Constraint::Fill(1),            // Stages table
     ])
     .split(area);
 
     // -- Header --
     let header_lines = vec![
         Line::from(vec![
-            Span::styled(
-                format!(" Job #{} ", job.job_id),
-                theme::tab_active(),
-            ),
+            Span::styled(format!(" Job #{} ", job.job_id), theme::tab_active()),
             Span::raw("  "),
             Span::styled(&job.status, status_style),
             Span::raw("  "),
-            Span::raw(format!("{}  Started {}  Tasks: {}", duration_str, started_str, job.num_tasks)),
+            Span::raw(format!(
+                "{}  Started {}  Tasks: {}",
+                duration_str, started_str, job.num_tasks
+            )),
         ]),
         Line::from(vec![
             Span::styled(" Name: ", theme::tab_active()),
@@ -148,10 +143,7 @@ pub fn render_job_detail(
     // -- SQL section --
     if has_sql {
         let sql_id = job.sql_id.unwrap();
-        let sql_desc = job
-            .sql_description
-            .as_deref()
-            .unwrap_or("(no description)");
+        let sql_desc = job.sql_description.as_deref().unwrap_or("(no description)");
 
         let mut sql_lines = vec![Line::from(vec![
             Span::styled(" SQL: ", theme::tab_active()),
@@ -160,11 +152,7 @@ pub fn render_job_detail(
 
         // Show first few lines of plan_description
         if let Some(plan) = &job.sql_plan {
-            let plan_preview: String = plan
-                .lines()
-                .take(2)
-                .collect::<Vec<_>>()
-                .join(" | ");
+            let plan_preview: String = plan.lines().take(2).collect::<Vec<_>>().join(" | ");
             sql_lines.push(Line::from(vec![
                 Span::styled(" Plan: ", theme::tab_active()),
                 Span::raw(truncate(&plan_preview, 80)),
@@ -185,7 +173,16 @@ pub fn render_job_detail(
         .collect();
 
     let stage_header_cells = [
-        "ID", "Status", "Name", "Duration", "Tasks", "Input", "Output", "Shuf Read", "Shuf Write", "Spill",
+        "ID",
+        "Status",
+        "Name",
+        "Duration",
+        "Tasks",
+        "Input",
+        "Output",
+        "Shuf Read",
+        "Shuf Write",
+        "Spill",
     ]
     .iter()
     .map(|h| Cell::from(*h).style(theme::tab_active()));
@@ -210,11 +207,31 @@ pub fn render_job_detail(
                 None => "active".to_string(),
             };
 
-            let input_str = if s.input_bytes > 0 { format_bytes(s.input_bytes) } else { "-".to_string() };
-            let output_str = if s.output_bytes > 0 { format_bytes(s.output_bytes) } else { "-".to_string() };
-            let shuf_r_str = if s.shuffle_read_bytes > 0 { format_bytes(s.shuffle_read_bytes) } else { "-".to_string() };
-            let shuf_w_str = if s.shuffle_write_bytes > 0 { format_bytes(s.shuffle_write_bytes) } else { "-".to_string() };
-            let spill_str = if s.disk_bytes_spilled > 0 { format_bytes(s.disk_bytes_spilled) } else { "-".to_string() };
+            let input_str = if s.input_bytes > 0 {
+                format_bytes(s.input_bytes)
+            } else {
+                "-".to_string()
+            };
+            let output_str = if s.output_bytes > 0 {
+                format_bytes(s.output_bytes)
+            } else {
+                "-".to_string()
+            };
+            let shuf_r_str = if s.shuffle_read_bytes > 0 {
+                format_bytes(s.shuffle_read_bytes)
+            } else {
+                "-".to_string()
+            };
+            let shuf_w_str = if s.shuffle_write_bytes > 0 {
+                format_bytes(s.shuffle_write_bytes)
+            } else {
+                "-".to_string()
+            };
+            let spill_str = if s.disk_bytes_spilled > 0 {
+                format_bytes(s.disk_bytes_spilled)
+            } else {
+                "-".to_string()
+            };
 
             Row::new(vec![
                 Cell::from(s.stage_id.to_string()),
@@ -234,7 +251,7 @@ pub fn render_job_detail(
     let stage_widths = [
         Constraint::Length(5),  // ID
         Constraint::Length(10), // Status
-        Constraint::Fill(1),   // Name
+        Constraint::Fill(1),    // Name
         Constraint::Length(10), // Duration
         Constraint::Length(7),  // Tasks
         Constraint::Length(10), // Input
@@ -246,11 +263,7 @@ pub fn render_job_detail(
 
     let stage_table = Table::new(stage_rows, stage_widths)
         .header(stage_header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Stages"),
-        )
+        .block(Block::default().borders(Borders::ALL).title("Stages"))
         .row_highlight_style(theme::selected())
         .highlight_symbol("▶ ");
 
@@ -259,32 +272,29 @@ pub fn render_job_detail(
 
 pub fn render_sql_detail(f: &mut Frame, area: Rect, job: &RankedJob, scroll: u16) {
     let sql_id = job.sql_id.unwrap_or(0);
-    let sql_desc = job
-        .sql_description
-        .as_deref()
-        .unwrap_or("(no description)");
+    let sql_desc = job.sql_description.as_deref().unwrap_or("(no description)");
     let sql_plan = job.sql_plan.as_deref().unwrap_or("(no plan available)");
 
     let mut lines: Vec<Line> = Vec::new();
 
-    lines.push(Line::from(vec![
-        Span::styled("Description: ", theme::tab_active()),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "Description: ",
+        theme::tab_active(),
+    )]));
     lines.extend(highlight::highlight_sql(sql_desc));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Execution Plan: ", theme::tab_active()),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "Execution Plan: ",
+        theme::tab_active(),
+    )]));
     lines.extend(highlight::highlight_spark_plan(sql_plan));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("SQL #{}", sql_id));
 
-    let para = Paragraph::new(lines)
-        .block(block)
-        .scroll((scroll, 0));
+    let para = Paragraph::new(lines).block(block).scroll((scroll, 0));
 
     f.render_widget(para, area);
 }

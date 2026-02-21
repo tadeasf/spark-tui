@@ -5,7 +5,9 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum FetchError {
-    #[error("Unauthorized (401): Token expired or invalid. Regenerate at Settings > Developer > Access Tokens.")]
+    #[error(
+        "Unauthorized (401): Token expired or invalid. Regenerate at Settings > Developer > Access Tokens."
+    )]
     Unauthorized,
 
     #[error("Forbidden (403): Insufficient permissions to access this cluster.")]
@@ -85,9 +87,9 @@ impl SparkHttpClient {
             };
         }
 
-        response.json::<T>().await.map_err(|e| FetchError::Deserialize {
-            source: e,
-            url,
-        })
+        response
+            .json::<T>()
+            .await
+            .map_err(|e| FetchError::Deserialize { source: e, url })
     }
 }

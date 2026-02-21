@@ -85,8 +85,7 @@ pub fn detect_skew(
     suspect.stage_name = stage_name.map(|s| s.to_string());
     suspect.sql_id = sql_id;
     suspect.sql_description = sql_description.map(|s| s.to_string());
-    suspect.recommendation =
-        Some("Consider repartitioning or salting skewed keys.".to_string());
+    suspect.recommendation = Some("Consider repartitioning or salting skewed keys.".to_string());
 
     Some(suspect)
 }

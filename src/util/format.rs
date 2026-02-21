@@ -157,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_clean_stage_name_plain() {
-        assert_eq!(clean_stage_name("aggregate at MyFile.scala:42"), "aggregate at MyFile.scala:42");
+        assert_eq!(
+            clean_stage_name("aggregate at MyFile.scala:42"),
+            "aggregate at MyFile.scala:42"
+        );
     }
 
     #[test]
@@ -180,7 +183,15 @@ AdaptiveSparkPlan (65)
    +- Filter (isnotnull(col#456))
       +- Scan parquet db.table [col1, col2]"#;
         let ops = parse_plan_top_operations(plan, 5);
-        assert_eq!(ops, vec!["AdaptiveSparkPlan", "Exchange hashpartitioning", "Filter", "Scan parquet db.table"]);
+        assert_eq!(
+            ops,
+            vec![
+                "AdaptiveSparkPlan",
+                "Exchange hashpartitioning",
+                "Filter",
+                "Scan parquet db.table"
+            ]
+        );
     }
 
     #[test]

@@ -38,14 +38,20 @@ mod tests {
     fn test_parse_rfc3339() {
         let ts = "2024-01-15T10:30:00.000+00:00";
         let dt = parse_spark_timestamp(ts).unwrap();
-        assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "2024-01-15T10:30:00.000Z");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.000Z"
+        );
     }
 
     #[test]
     fn test_parse_naive() {
         let ts = "2024-01-15T10:30:00.000";
         let dt = parse_spark_timestamp(ts).unwrap();
-        assert_eq!(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "2024-01-15T10:30:00.000Z");
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.000Z"
+        );
     }
 
     #[test]

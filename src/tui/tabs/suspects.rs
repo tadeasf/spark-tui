@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
-    Frame,
 };
 
 use crate::analyze::types::{BottleneckPattern, Suspect};
@@ -41,8 +41,12 @@ pub fn render_suspects_tab(
 
             let (pattern_str, pattern_style) = match s.bottleneck {
                 Some(BottleneckPattern::LargeScan) => ("Large Scan".to_string(), theme::warning()),
-                Some(BottleneckPattern::WideShuffle) => ("Wide Shuffle".to_string(), theme::critical()),
-                Some(BottleneckPattern::DataExplosion) => ("Data Explosion".to_string(), theme::critical()),
+                Some(BottleneckPattern::WideShuffle) => {
+                    ("Wide Shuffle".to_string(), theme::critical())
+                }
+                Some(BottleneckPattern::DataExplosion) => {
+                    ("Data Explosion".to_string(), theme::critical())
+                }
                 None => ("-".to_string(), theme::muted()),
             };
 
@@ -101,10 +105,7 @@ pub fn render_suspects_tab(
 
         // SQL line
         if let Some(sql_id) = s.sql_id {
-            let desc = s
-                .sql_description
-                .as_deref()
-                .unwrap_or("(no description)");
+            let desc = s.sql_description.as_deref().unwrap_or("(no description)");
             lines.push(Line::from(vec![
                 Span::styled("SQL:     ", theme::tab_active()),
                 Span::raw(format!("#{} — {}", sql_id, truncate(desc, 70))),
@@ -160,8 +161,7 @@ pub fn render_suspects_tab(
         let paragraph = Paragraph::new(lines).block(detail_block);
         f.render_widget(paragraph, chunks[1]);
     } else {
-        let paragraph =
-            Paragraph::new("No suspect selected.").block(detail_block);
+        let paragraph = Paragraph::new("No suspect selected.").block(detail_block);
         f.render_widget(paragraph, chunks[1]);
     }
 }

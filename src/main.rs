@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event};
-use fetch::poller::run_poller;
 use fetch::SparkHttpClient;
+use fetch::poller::run_poller;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 use tui::Action;

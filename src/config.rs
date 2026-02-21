@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "spark-tui", about = "Terminal UI for Spark performance analysis")]
+#[command(
+    name = "spark-tui",
+    about = "Terminal UI for Spark performance analysis"
+)]
 pub struct CliArgs {
     /// Databricks workspace host (e.g. adb-123.azuredatabricks.net)
     #[arg(long, env = "DATABRICKS_HOST")]
@@ -56,8 +59,7 @@ pub fn resolve_config() -> Result<Config, String> {
     let args = CliArgs::parse();
 
     // If all three are provided via CLI/env, we're done
-    if let (Some(host), Some(token), Some(cluster_id)) =
-        (&args.host, &args.token, &args.cluster_id)
+    if let (Some(host), Some(token), Some(cluster_id)) = (&args.host, &args.token, &args.cluster_id)
     {
         return Ok(Config {
             host: host.clone(),
@@ -144,11 +146,7 @@ fn databrickscfg_path() -> Option<PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()?;
     let path = PathBuf::from(home).join(".databrickscfg");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 type Profile = HashMap<String, String>;
@@ -243,10 +241,7 @@ auth_type=azure-cli
         assert!(profiles.contains_key("other"));
 
         let p = &profiles["my-profile"];
-        assert_eq!(
-            p["host"],
-            "https://adb-123.6.azuredatabricks.net"
-        );
+        assert_eq!(p["host"], "https://adb-123.6.azuredatabricks.net");
         assert_eq!(p["cluster_id"], "0530-080901-abc123");
         assert_eq!(p["token"], "dapi1234567890");
 

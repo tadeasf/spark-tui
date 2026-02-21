@@ -120,7 +120,11 @@ pub fn detect_slow_stages(
     }
 
     let n = completed.len() as f64;
-    let mean = completed.iter().map(|s| s.executor_run_time as f64).sum::<f64>() / n;
+    let mean = completed
+        .iter()
+        .map(|s| s.executor_run_time as f64)
+        .sum::<f64>()
+        / n;
     let variance = completed
         .iter()
         .map(|s| (s.executor_run_time as f64 - mean).powi(2))
@@ -230,8 +234,10 @@ pub fn detect_spill(
                     "Increase spark.executor.memory or reduce partition size. {}",
                     bottleneck_recommendation(b)
                 ),
-                None => "Increase spark.executor.memory or reduce partition size with repartition()."
-                    .to_string(),
+                None => {
+                    "Increase spark.executor.memory or reduce partition size with repartition()."
+                        .to_string()
+                }
             });
             suspect.sql_plan_hint =
                 resolve_plan_hint(s.stage_id, stage_to_job, job_to_sql, sql_plans);
@@ -284,7 +290,13 @@ mod tests {
     fn test_no_slow_stages_uniform() {
         let stages: Vec<SparkStage> = (0..10).map(|i| make_stage(i, 1000, 0)).collect();
         let map = HashMap::new();
-        let suspects = detect_slow_stages(&stages, &map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let suspects = detect_slow_stages(
+            &stages,
+            &map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(suspects.is_empty());
     }
 
@@ -293,7 +305,13 @@ mod tests {
         let mut stages: Vec<SparkStage> = (0..9).map(|i| make_stage(i, 1000, 0)).collect();
         stages.push(make_stage(9, 100000, 0));
         let map = HashMap::new();
-        let suspects = detect_slow_stages(&stages, &map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let suspects = detect_slow_stages(
+            &stages,
+            &map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(!suspects.is_empty());
         assert_eq!(suspects[0].stage_id, 9);
         assert!(suspects[0].stage_name.is_some());
@@ -304,7 +322,13 @@ mod tests {
     fn test_spill_detected() {
         let stages = vec![make_stage(0, 1000, 500_000_000)];
         let map = HashMap::new();
-        let suspects = detect_spill(&stages, &map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let suspects = detect_spill(
+            &stages,
+            &map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].severity, Severity::Warning);
         assert!(suspects[0].recommendation.is_some());
@@ -314,7 +338,13 @@ mod tests {
     fn test_critical_spill() {
         let stages = vec![make_stage(0, 1000, 2_000_000_000)];
         let map = HashMap::new();
-        let suspects = detect_spill(&stages, &map, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let suspects = detect_spill(
+            &stages,
+            &map,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(suspects.len(), 1);
         assert_eq!(suspects[0].severity, Severity::Critical);
     }
@@ -365,7 +395,10 @@ mod tests {
     fn test_classify_wide_shuffle() {
         // 100MB input, 100MB output, 600MB shuffle_write → WideShuffle
         let s = make_stage_io(0, 104_857_600, 104_857_600, 629_145_600, 0);
-        assert_eq!(classify_bottleneck(&s), Some(BottleneckPattern::WideShuffle));
+        assert_eq!(
+            classify_bottleneck(&s),
+            Some(BottleneckPattern::WideShuffle)
+        );
     }
 
     #[test]

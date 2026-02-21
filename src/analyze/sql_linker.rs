@@ -90,7 +90,11 @@ pub fn stages_for_task_analysis(stages: &[SparkStage]) -> Vec<(i64, i64)> {
     // Top 5 by shuffle_write_bytes
     let mut by_shuffle = completed.clone();
     by_shuffle.sort_by(|a, b| b.shuffle_write_bytes.cmp(&a.shuffle_write_bytes));
-    for s in by_shuffle.iter().take(5).filter(|s| s.shuffle_write_bytes > 0) {
+    for s in by_shuffle
+        .iter()
+        .take(5)
+        .filter(|s| s.shuffle_write_bytes > 0)
+    {
         selected.entry(s.stage_id).or_insert(s.attempt_id);
     }
 

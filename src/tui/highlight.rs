@@ -5,10 +5,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use syntect::{
-    easy::HighlightLines,
-    highlighting::ThemeSet,
-    parsing::SyntaxSet,
-    util::LinesWithEndings,
+    easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings,
 };
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -194,9 +191,7 @@ fn tokenize_plan_content(content: &str, spans: &mut Vec<Span<'static>>) {
         // Default: consume until next potential token start
         let start = pos;
         pos += 1;
-        while pos < bytes.len()
-            && !is_token_start(content, pos)
-        {
+        while pos < bytes.len() && !is_token_start(content, pos) {
             pos += 1;
         }
         spans.push(Span::raw(content[start..pos].to_string()));
@@ -278,7 +273,11 @@ fn try_match_number(content: &str, pos: usize) -> Option<usize> {
     }
 
     // Make sure it's standalone (not part of a word)
-    if pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_' || bytes[pos - 1] == b'#') {
+    if pos > 0
+        && (bytes[pos - 1].is_ascii_alphanumeric()
+            || bytes[pos - 1] == b'_'
+            || bytes[pos - 1] == b'#')
+    {
         return None;
     }
 
@@ -314,7 +313,11 @@ fn is_token_start(content: &str, pos: usize) -> bool {
     }
     // Could be a standalone number
     if b.is_ascii_digit() {
-        if pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_' || bytes[pos - 1] == b'#') {
+        if pos > 0
+            && (bytes[pos - 1].is_ascii_alphanumeric()
+                || bytes[pos - 1] == b'_'
+                || bytes[pos - 1] == b'#')
+        {
             return false;
         }
         return true;
