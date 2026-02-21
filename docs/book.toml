@@ -1,7 +1,6 @@
 [book]
 authors = ["spark-tui contributors"]
 language = "en"
-multilingual = false
 src = "src"
 title = "spark-tui Documentation"
 

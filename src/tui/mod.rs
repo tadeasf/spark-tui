@@ -1,4 +1,5 @@
 pub mod app;
+pub mod highlight;
 pub mod tabs;
 pub mod theme;
 pub mod widgets;

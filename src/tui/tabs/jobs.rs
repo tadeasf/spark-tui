@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::analyze::types::RankedJob;
 use crate::fetch::types::{SparkSqlExecution, SparkStage};
-use crate::tui::theme;
+use crate::tui::{highlight, theme};
 use crate::util::format::{clean_stage_name, format_bytes, format_duration_ms, truncate};
 use crate::util::time::{duration_between, parse_spark_timestamp};
 
@@ -270,17 +270,13 @@ pub fn render_sql_detail(f: &mut Frame, area: Rect, job: &RankedJob, scroll: u16
     lines.push(Line::from(vec![
         Span::styled("Description: ", theme::tab_active()),
     ]));
-    for line in sql_desc.lines() {
-        lines.push(Line::from(Span::raw(line.to_string())));
-    }
+    lines.extend(highlight::highlight_sql(sql_desc));
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("Execution Plan: ", theme::tab_active()),
     ]));
-    for line in sql_plan.lines() {
-        lines.push(Line::from(Span::raw(line.to_string())));
-    }
+    lines.extend(highlight::highlight_spark_plan(sql_plan));
 
     let block = Block::default()
         .borders(Borders::ALL)
