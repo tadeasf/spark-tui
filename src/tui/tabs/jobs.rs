@@ -294,7 +294,15 @@ pub fn render_sql_detail(f: &mut Frame, area: Rect, job: &RankedJob, scroll: u16
         .borders(Borders::ALL)
         .title(format!("SQL #{}", sql_id));
 
-    let para = Paragraph::new(lines).block(block).scroll((scroll, 0));
+    // Clamp scroll to avoid overflow inside ratatui's Paragraph rendering
+    let content_height = lines.len() as u16;
+    let visible_height = area.height.saturating_sub(2); // subtract border
+    let max_scroll = content_height.saturating_sub(visible_height);
+    let clamped_scroll = scroll.min(max_scroll);
+
+    let para = Paragraph::new(lines)
+        .block(block)
+        .scroll((clamped_scroll, 0));
 
     f.render_widget(para, area);
 }
