@@ -345,10 +345,7 @@ pub fn detect_record_explosion(
 ) -> Vec<Suspect> {
     stages
         .iter()
-        .filter(|s| {
-            s.input_records > 1000
-                && s.output_records > 10 * s.input_records
-        })
+        .filter(|s| s.input_records > 1000 && s.output_records > 10 * s.input_records)
         .map(|s| {
             let ratio = s.output_records as f64 / s.input_records as f64;
             let severity = if ratio > 100.0 {

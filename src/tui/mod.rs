@@ -32,7 +32,7 @@ pub enum Action {
     Key(KeyEvent),
     Mouse(crossterm::event::MouseEvent),
     Resize(u16, u16),
-    DataUpdate(DataPayload),
+    DataUpdate(Box<DataPayload>),
     FetchError(FetchError),
     TaskDataLoaded(i64, Vec<SparkTask>),
     TaskFetchFailed(i64, String),

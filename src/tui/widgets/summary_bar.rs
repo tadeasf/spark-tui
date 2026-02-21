@@ -46,9 +46,10 @@ pub fn render_summary_bar(f: &mut Frame, area: Rect, summary: &HealthSummary) {
         "Health: OK".to_string()
     };
 
-    let line1 = Line::from(vec![
-        Span::styled(format!(" {} | {} | {}", job_info, io_info, health_info), base_style),
-    ]);
+    let line1 = Line::from(vec![Span::styled(
+        format!(" {} | {} | {}", job_info, io_info, health_info),
+        base_style,
+    )]);
 
     // Line 2: Top critical issues or "No issues"
     let line2 = if !summary.top_issues.is_empty() {

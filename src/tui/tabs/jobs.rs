@@ -333,10 +333,7 @@ pub fn render_stage_detail(
     let status_str = format!("{:?}", stage.status).to_uppercase();
 
     lines.push(Line::from(vec![
-        Span::styled(
-            format!(" Stage #{} ", stage.stage_id),
-            theme::tab_active(),
-        ),
+        Span::styled(format!(" Stage #{} ", stage.stage_id), theme::tab_active()),
         Span::raw("  "),
         Span::styled(&status_str, theme::running()),
         Span::raw("  "),
@@ -485,8 +482,7 @@ pub fn render_stage_detail(
                     let bucket_width = range / num_buckets as f64;
                     let mut buckets = vec![0usize; num_buckets];
                     for &d in &durations {
-                        let idx =
-                            ((d - min) / bucket_width).floor() as usize;
+                        let idx = ((d - min) / bucket_width).floor() as usize;
                         let idx = idx.min(num_buckets - 1);
                         buckets[idx] += 1;
                     }
@@ -519,9 +515,7 @@ pub fn render_stage_detail(
             // -- Per-executor breakdown --
             let mut exec_data: HashMap<&str, (i64, i64, i64)> = HashMap::new();
             for t in tasks {
-                let entry = exec_data
-                    .entry(t.executor_id.as_str())
-                    .or_insert((0, 0, 0));
+                let entry = exec_data.entry(t.executor_id.as_str()).or_insert((0, 0, 0));
                 entry.0 += 1; // task count
                 entry.1 += t.duration.unwrap_or(0); // total duration
                 entry.2 += t.input_bytes + t.shuffle_read_bytes; // total bytes
@@ -563,7 +557,11 @@ pub fn render_stage_detail(
             }
 
             // -- Peak execution memory (task-level) --
-            let max_mem = tasks.iter().map(|t| t.peak_execution_memory).max().unwrap_or(0);
+            let max_mem = tasks
+                .iter()
+                .map(|t| t.peak_execution_memory)
+                .max()
+                .unwrap_or(0);
             if max_mem > 0 {
                 let total_mem: i64 = tasks.iter().map(|t| t.peak_execution_memory).sum();
                 let avg_mem = total_mem / tasks.len() as i64;
@@ -590,14 +588,12 @@ pub fn render_stage_detail(
             if durations.len() >= 2 {
                 let n = durations.len() as f64;
                 let mean = durations.iter().sum::<f64>() / n;
-                let variance =
-                    durations.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n;
+                let variance = durations.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n;
                 let stddev = variance.sqrt();
                 let cv = if mean > 0.0 { stddev / mean } else { 0.0 };
                 let median = percentile(&durations, 0.5);
                 let max_val = durations.last().copied().unwrap_or(0.0);
-                let max_median_ratio =
-                    if median > 0.0 { max_val / median } else { 0.0 };
+                let max_median_ratio = if median > 0.0 { max_val / median } else { 0.0 };
 
                 let slowest_task = tasks
                     .iter()
@@ -610,10 +606,7 @@ pub fn render_stage_detail(
                 )));
                 lines.push(Line::from(format!(
                     "   CV: {:.2}  Max/Median: {:.1}x  Slowest: task #{} on executor {}",
-                    cv,
-                    max_median_ratio,
-                    slowest_task.task_id,
-                    slowest_task.executor_id,
+                    cv, max_median_ratio, slowest_task.task_id, slowest_task.executor_id,
                 )));
             }
         }

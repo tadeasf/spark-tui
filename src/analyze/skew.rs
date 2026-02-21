@@ -27,11 +27,7 @@ fn analyze_distribution(values: &[f64]) -> Option<(f64, f64, f64, f64)> {
         sorted[sorted.len() / 2]
     };
     let max_val = sorted.last().copied().unwrap_or(0.0);
-    let max_median_ratio = if median > 0.0 {
-        max_val / median
-    } else {
-        0.0
-    };
+    let max_median_ratio = if median > 0.0 { max_val / median } else { 0.0 };
     Some((cv, max_median_ratio, median, max_val))
 }
 
@@ -214,11 +210,7 @@ pub fn detect_skew(
                         SuspectCategory::ExecutorHotspot,
                         stage_id,
                         job_id,
-                        format!(
-                            "Executor {} handles {:.0}% of data",
-                            exec_id,
-                            pct * 100.0
-                        ),
+                        format!("Executor {} handles {:.0}% of data", exec_id, pct * 100.0),
                         format!(
                             "Executor {} processed {} ({:.0}% of total {}) across {} tasks",
                             exec_id,

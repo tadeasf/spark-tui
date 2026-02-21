@@ -105,7 +105,8 @@ impl App {
     pub fn handle_action(&mut self, action: Action) {
         match action {
             Action::Key(key) => self.handle_key(key),
-            Action::DataUpdate(mut payload) => {
+            Action::DataUpdate(payload) => {
+                let mut payload = *payload;
                 self.error_msg = None;
 
                 // Preserve selection across refresh
@@ -134,8 +135,7 @@ impl App {
 
                 // Preserve on-demand fetched task data across poller refreshes
                 if let Some(old_data) = &self.data {
-                    let mut merged =
-                        (*payload.stage_tasks).clone();
+                    let mut merged = (*payload.stage_tasks).clone();
                     for (stage_id, tasks) in old_data.stage_tasks.iter() {
                         merged.entry(*stage_id).or_insert_with(|| tasks.clone());
                     }
@@ -313,10 +313,7 @@ impl App {
                                         let tx = self.tx.clone();
                                         let app_id = data.app_id.clone();
                                         tokio::spawn(async move {
-                                            match client
-                                                .get_task_list(&app_id, sid, aid)
-                                                .await
-                                            {
+                                            match client.get_task_list(&app_id, sid, aid).await {
                                                 Ok(tasks) => {
                                                     let _ =
                                                         tx.send(Action::TaskDataLoaded(sid, tasks));
@@ -384,9 +381,7 @@ impl App {
         };
 
         self.render_tab_bar(f, chunks[0]);
-        if show_summary
-            && let Some(data) = &self.data
-        {
+        if show_summary && let Some(data) = &self.data {
             summary_bar::render_summary_bar(f, chunks[1], &data.summary);
         }
         self.render_content(f, chunks[2]);
@@ -470,10 +465,8 @@ impl App {
                                     .filter(|s| job.stage_ids.contains(&s.stage_id))
                                     .collect();
                                 if let Some(stage) = job_stages.get(stage_idx) {
-                                    let tasks = data
-                                        .stage_tasks
-                                        .get(&stage.stage_id)
-                                        .map(|v| v.as_slice());
+                                    let tasks =
+                                        data.stage_tasks.get(&stage.stage_id).map(|v| v.as_slice());
                                     let loading =
                                         self.pending_task_fetches.contains(&stage.stage_id);
                                     jobs::render_stage_detail(

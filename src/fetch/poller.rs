@@ -40,7 +40,7 @@ pub async fn run_poller(
     loop {
         match poll_once(&client, &app_id).await {
             Ok(payload) => {
-                if tx.send(Action::DataUpdate(payload)).is_err() {
+                if tx.send(Action::DataUpdate(Box::new(payload))).is_err() {
                     break; // receiver dropped
                 }
             }

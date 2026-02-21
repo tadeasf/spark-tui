@@ -89,11 +89,7 @@ impl SparkHttpClient {
 
         serde_json::from_str::<T>(&body).map_err(|e| {
             let sample = if body.len() > 500 {
-                format!(
-                    "{}...(truncated, {} bytes total)",
-                    &body[..500],
-                    body.len()
-                )
+                format!("{}...(truncated, {} bytes total)", &body[..500], body.len())
             } else {
                 body
             };
