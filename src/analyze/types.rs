@@ -37,7 +37,15 @@ impl fmt::Display for Severity {
 pub enum SuspectCategory {
     SlowStage,
     DataSkew,
+    DataSizeSkew,
+    RecordCountSkew,
     DiskSpill,
+    CpuBottleneck,
+    IoBottleneck,
+    RecordExplosion,
+    TaskFailures,
+    MemoryPressure,
+    ExecutorHotspot,
 }
 
 impl fmt::Display for SuspectCategory {
@@ -45,7 +53,15 @@ impl fmt::Display for SuspectCategory {
         match self {
             SuspectCategory::SlowStage => write!(f, "Slow Stage"),
             SuspectCategory::DataSkew => write!(f, "Data Skew"),
+            SuspectCategory::DataSizeSkew => write!(f, "Size Skew"),
+            SuspectCategory::RecordCountSkew => write!(f, "Record Skew"),
             SuspectCategory::DiskSpill => write!(f, "Disk Spill"),
+            SuspectCategory::CpuBottleneck => write!(f, "CPU Bound"),
+            SuspectCategory::IoBottleneck => write!(f, "I/O Bound"),
+            SuspectCategory::RecordExplosion => write!(f, "Rec Explode"),
+            SuspectCategory::TaskFailures => write!(f, "Task Fail"),
+            SuspectCategory::MemoryPressure => write!(f, "Mem Pressure"),
+            SuspectCategory::ExecutorHotspot => write!(f, "Exec Hotspot"),
         }
     }
 }
@@ -56,6 +72,7 @@ pub enum BottleneckPattern {
     LargeScan,
     WideShuffle,
     DataExplosion,
+    RecordExplosion,
 }
 
 impl fmt::Display for BottleneckPattern {
@@ -64,6 +81,7 @@ impl fmt::Display for BottleneckPattern {
             BottleneckPattern::LargeScan => write!(f, "Large Scan"),
             BottleneckPattern::WideShuffle => write!(f, "Wide Shuffle"),
             BottleneckPattern::DataExplosion => write!(f, "Data Explosion"),
+            BottleneckPattern::RecordExplosion => write!(f, "Record Explosion"),
         }
     }
 }
@@ -111,4 +129,18 @@ impl Suspect {
             sql_plan_hint: None,
         }
     }
+}
+
+/// Aggregate health summary for the summary bar.
+#[derive(Debug, Clone)]
+pub struct HealthSummary {
+    pub total_jobs: usize,
+    pub running_jobs: usize,
+    pub failed_jobs: usize,
+    pub total_input_bytes: i64,
+    pub total_output_bytes: i64,
+    pub total_shuffle_bytes: i64,
+    pub critical_count: usize,
+    pub warning_count: usize,
+    pub top_issues: Vec<String>,
 }

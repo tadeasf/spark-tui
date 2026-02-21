@@ -37,4 +37,9 @@ impl SparkHttpClient {
         ))
         .await
     }
+
+    pub async fn get_executors(&self, app_id: &str) -> Result<Vec<SparkExecutor>, FetchError> {
+        self.get(&format!("/applications/{}/executors", app_id))
+            .await
+    }
 }

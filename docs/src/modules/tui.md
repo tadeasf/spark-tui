@@ -14,6 +14,7 @@ Contains the terminal UI: app state machine, event loop, tab rendering, widgets,
 | `tabs/suspects.rs` | Suspects table view |
 | `widgets/bar_chart.rs` | Duration bar chart for stage comparison |
 | `widgets/status_line.rs` | Status bar with cluster info and last update time |
+| `widgets/summary_bar.rs` | Health summary bar (top issues, job/IO counts) |
 
 ## `app.rs` — App State
 
@@ -32,9 +33,10 @@ Methods: `next()`, `prev()`, `index()`, `from_index()`, `titles()`.
 
 ```rust
 pub enum ViewMode {
-    List,       // Tab-level table view
-    JobDetail,  // Stage breakdown for a selected job
-    SqlDetail,  // SQL execution plan (scrollable)
+    List,         // Tab-level table view
+    JobDetail,    // Stage breakdown for a selected job
+    SqlDetail,    // SQL execution plan (scrollable)
+    StageDetail,  // Detailed metrics for a selected stage
 }
 ```
 
@@ -52,6 +54,7 @@ pub struct App {
     pub suspect_table_state: TableState,
     pub detail_table_state: TableState,
     pub sql_scroll: u16,
+    pub stage_detail_scroll: u16,
 }
 ```
 
@@ -87,6 +90,8 @@ Pure functions that return `ratatui::style::Style`:
 | `metric_bytes_style(bytes)` | Color-codes byte counts by size |
 | `shuffle_bytes_style(bytes)` | Color-codes shuffle bytes |
 | `spill_bytes_style(bytes)` | Color-codes spill bytes |
+| `cpu_utilization_style(ratio)` | Color-codes CPU utilization: ≥0.95 red (saturated), ≥0.5 green (healthy), ≥0.3 yellow (underutilized), <0.3 red (I/O bound) |
+| `memory_utilization_style(peak, cluster_mem)` | Color-codes peak memory relative to cluster total; falls back to absolute thresholds when cluster data unavailable |
 
 Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 
@@ -97,6 +102,7 @@ Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 | `render_jobs_tab(frame, area, app)` | Renders the jobs table with columns: ID, Status, Duration, Tasks, Failed, SQL, Submitted |
 | `render_job_detail(frame, area, app)` | Splits area into stage table (top) and duration bar chart (bottom) |
 | `render_sql_detail(frame, area, app)` | Renders scrollable SQL execution plan text |
+| `render_stage_detail(frame, area, stage, tasks, loading, scroll, cluster_mem)` | Renders stage detail with I/O, color-coded CPU %, peak RAM, task histograms, per-executor breakdown, skew metrics |
 
 ## `tabs/suspects.rs` — Suspects Tab
 
@@ -115,3 +121,9 @@ Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 | Function | Description |
 |----------|-------------|
 | `render_status_line(frame, area, app)` | Renders the bottom status bar showing cluster ID, app ID, and last update time |
+
+## `widgets/summary_bar.rs`
+
+| Function | Description |
+|----------|-------------|
+| `render_summary_bar(frame, area, summary)` | Renders 2-line health summary with colored foreground text (red=critical, yellow=warning, green=healthy) showing job/IO counts and top issues |

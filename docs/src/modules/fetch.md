@@ -73,8 +73,15 @@ Error enum with user-friendly messages for common HTTP errors:
 
 | Type | Key Fields |
 |------|------------|
-| `SparkTask` | `task_id`, `stage_id`, `executor_id`, `host`, `status`, `duration`, I/O bytes, spill bytes |
+| `SparkTask` | `task_id`, `stage_id`, `executor_id`, `host`, `status`, `duration`, I/O bytes, spill bytes, `peak_execution_memory` |
 | `RawSparkTask` | Raw API format with nested `task_metrics` (flattened into `SparkTask` via custom deserializer) |
+
+### Executor Types
+
+| Type | Key Fields |
+|------|------------|
+| `SparkExecutor` | `id`, `total_cores`, `max_memory`, `is_active` |
+| `ClusterResources` | `total_executor_memory`, `total_executor_cores`, `num_executors` |
 
 ## `spark.rs` — Endpoint Methods
 
@@ -87,6 +94,7 @@ Methods on `SparkHttpClient`:
 | `get_stages` | `/applications/{id}/stages` | `Vec<SparkStage>` |
 | `get_sql_executions` | `/applications/{id}/sql` | `Vec<SparkSqlExecution>` |
 | `get_task_list` | `/applications/{id}/stages/{sid}/{attempt}/taskList` | `Vec<SparkTask>` |
+| `get_executors` | `/applications/{id}/executors` | `Vec<SparkExecutor>` |
 
 ## `poller.rs` — Background Poller
 
@@ -107,11 +115,43 @@ pub async fn run_poller(
 
 Fetches all data and runs analysis in a single poll cycle:
 
-1. Fetch jobs, stages, SQL executions concurrently (`tokio::join!`)
-2. Build cross-reference maps (job↔SQL, stage↔job)
-3. Build ranked jobs (sorted by duration, running first)
-4. Run stage-level analysis (slow stages, spill)
-5. Fetch task lists for top 5 slowest stages
-6. Run skew detection on fetched tasks
-7. Aggregate and sort suspects
-8. Return `DataPayload`
+1. Fetch jobs, stages, SQL executions, and executors concurrently (4-way `tokio::join!`)
+2. Aggregate active executors into `ClusterResources` (total memory, cores, executor count)
+3. Build cross-reference maps (job↔SQL, stage↔job)
+4. Build ranked jobs (sorted by duration, running first)
+5. Run stage-level analysis (slow stages, spill, CPU efficiency, record explosion, task failures, memory pressure)
+6. Fetch task lists for top ~15 stages (selected by multiple heuristics)
+7. Run skew detection on fetched tasks (duration, data-size, record-count, executor hotspot)
+8. Aggregate and sort suspects
+9. Compute `HealthSummary` (job/IO counts, critical/warning counts, top issues)
+10. Return `DataPayload`
+
+### `compute_health_summary`
+
+```rust
+fn compute_health_summary(
+    jobs: &[RankedJob],
+    stages: &[SparkStage],
+    suspects: &[Suspect],
+) -> HealthSummary
+```
+
+Aggregates job counts, total I/O bytes, and suspect severity counts into a `HealthSummary` for the summary bar widget.
+
+### `DataPayload`
+
+```rust
+pub struct DataPayload {
+    pub app_id: String,
+    pub jobs: Vec<RankedJob>,
+    pub stages: Vec<SparkStage>,
+    pub sql_executions: Vec<SparkSqlExecution>,
+    pub suspects: Vec<Suspect>,
+    pub stage_tasks: Arc<HashMap<i64, Vec<SparkTask>>>,
+    pub summary: HealthSummary,
+    pub cluster_resources: ClusterResources,
+    pub last_updated: String,
+}
+```
+
+Note: `DataPayload` is defined in `src/tui/mod.rs` and contains all data needed to render the TUI, including `cluster_resources` for memory utilization color-coding.

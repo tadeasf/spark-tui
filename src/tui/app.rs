@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -7,9 +10,12 @@ use ratatui::{
     widgets::{Block, Borders, TableState, Tabs},
 };
 use tokio::sync::mpsc;
+use tracing::warn;
+
+use crate::fetch::client::SparkHttpClient;
 
 use super::tabs::{jobs, suspects};
-use super::widgets::status_line;
+use super::widgets::{status_line, summary_bar};
 use super::{Action, DataPayload};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +58,7 @@ pub enum ViewMode {
     List,
     JobDetail,
     SqlDetail,
+    StageDetail,
 }
 
 pub struct App {
@@ -65,10 +72,18 @@ pub struct App {
     pub suspect_table_state: TableState,
     pub detail_table_state: TableState,
     pub sql_scroll: u16,
+    pub stage_detail_scroll: u16,
+    client: Arc<SparkHttpClient>,
+    tx: mpsc::UnboundedSender<Action>,
+    pending_task_fetches: HashSet<i64>,
 }
 
 impl App {
-    pub fn new(cluster_id: String) -> Self {
+    pub fn new(
+        cluster_id: String,
+        client: Arc<SparkHttpClient>,
+        tx: mpsc::UnboundedSender<Action>,
+    ) -> Self {
         Self {
             active_tab: Tab::Jobs,
             view_mode: ViewMode::List,
@@ -80,6 +95,10 @@ impl App {
             suspect_table_state: TableState::default(),
             detail_table_state: TableState::default(),
             sql_scroll: 0,
+            stage_detail_scroll: 0,
+            client,
+            tx,
+            pending_task_fetches: HashSet::new(),
         }
     }
 
@@ -87,11 +106,15 @@ impl App {
         match action {
             Action::Key(key) => self.handle_key(key),
             Action::DataUpdate(payload) => {
+                let mut payload = *payload;
                 self.error_msg = None;
 
                 // Preserve selection across refresh
                 #[allow(clippy::collapsible_if)]
-                if self.view_mode == ViewMode::JobDetail || self.view_mode == ViewMode::SqlDetail {
+                if self.view_mode == ViewMode::JobDetail
+                    || self.view_mode == ViewMode::SqlDetail
+                    || self.view_mode == ViewMode::StageDetail
+                {
                     if let Some(old_data) = &self.data {
                         if let Some(sel_idx) = self.job_table_state.selected() {
                             if let Some(old_job) = old_data.jobs.get(sel_idx) {
@@ -110,10 +133,33 @@ impl App {
                     }
                 }
 
+                // Preserve on-demand fetched task data across poller refreshes
+                if let Some(old_data) = &self.data {
+                    let mut merged = (*payload.stage_tasks).clone();
+                    for (stage_id, tasks) in old_data.stage_tasks.iter() {
+                        merged.entry(*stage_id).or_insert_with(|| tasks.clone());
+                    }
+                    payload.stage_tasks = Arc::new(merged);
+                }
+
                 self.data = Some(payload);
             }
             Action::FetchError(err) => {
                 self.error_msg = Some(err.to_string());
+            }
+            Action::TaskDataLoaded(stage_id, tasks) => {
+                self.pending_task_fetches.remove(&stage_id);
+                if let Some(data) = &self.data {
+                    let mut map = (*data.stage_tasks).clone();
+                    map.insert(stage_id, tasks);
+                    let mut new_data = data.clone();
+                    new_data.stage_tasks = Arc::new(map);
+                    self.data = Some(new_data);
+                }
+            }
+            Action::TaskFetchFailed(stage_id, err) => {
+                self.pending_task_fetches.remove(&stage_id);
+                warn!("Failed to fetch tasks for stage {}: {}", stage_id, err);
             }
             Action::Resize(_, _) => {}
             Action::Mouse(_) => {}
@@ -127,7 +173,7 @@ impl App {
                 Tab::Jobs => Some(&mut self.job_table_state),
                 Tab::Suspects => Some(&mut self.suspect_table_state),
             },
-            ViewMode::SqlDetail => None, // Scroll-based, no table
+            ViewMode::SqlDetail | ViewMode::StageDetail => None, // Scroll-based, no table
         }
     }
 
@@ -138,6 +184,7 @@ impl App {
                 ViewMode::List => self.should_quit = true,
                 ViewMode::JobDetail => self.view_mode = ViewMode::List,
                 ViewMode::SqlDetail => self.view_mode = ViewMode::JobDetail,
+                ViewMode::StageDetail => self.view_mode = ViewMode::JobDetail,
             },
             KeyCode::Tab if self.view_mode == ViewMode::List => {
                 self.active_tab = self.active_tab.next();
@@ -170,6 +217,18 @@ impl App {
             }
             KeyCode::End | KeyCode::Char('G') if self.view_mode == ViewMode::SqlDetail => {
                 self.sql_scroll = u16::MAX; // Will be clamped by Paragraph
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.view_mode == ViewMode::StageDetail => {
+                self.stage_detail_scroll = self.stage_detail_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.view_mode == ViewMode::StageDetail => {
+                self.stage_detail_scroll = self.stage_detail_scroll.saturating_sub(1);
+            }
+            KeyCode::Home | KeyCode::Char('g') if self.view_mode == ViewMode::StageDetail => {
+                self.stage_detail_scroll = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') if self.view_mode == ViewMode::StageDetail => {
+                self.stage_detail_scroll = u16::MAX;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(ts) = self.active_table_state() {
@@ -227,7 +286,54 @@ impl App {
                     }
                 }
             },
-            ViewMode::JobDetail | ViewMode::SqlDetail => {
+            ViewMode::JobDetail => {
+                // Enter on a stage → StageDetail
+                if let Some(stage_idx) = self.detail_table_state.selected() {
+                    if let Some(data) = &self.data {
+                        if let Some(job_idx) = self.job_table_state.selected() {
+                            if let Some(job) = data.jobs.get(job_idx) {
+                                // Verify the stage exists in this job
+                                let job_stages: Vec<&crate::fetch::types::SparkStage> = data
+                                    .stages
+                                    .iter()
+                                    .filter(|s| job.stage_ids.contains(&s.stage_id))
+                                    .collect();
+                                if let Some(stage) = job_stages.get(stage_idx) {
+                                    self.stage_detail_scroll = 0;
+                                    self.view_mode = ViewMode::StageDetail;
+
+                                    // Trigger on-demand task fetch if not already loaded/pending
+                                    let sid = stage.stage_id;
+                                    let aid = stage.attempt_id;
+                                    if !data.stage_tasks.contains_key(&sid)
+                                        && !self.pending_task_fetches.contains(&sid)
+                                    {
+                                        self.pending_task_fetches.insert(sid);
+                                        let client = Arc::clone(&self.client);
+                                        let tx = self.tx.clone();
+                                        let app_id = data.app_id.clone();
+                                        tokio::spawn(async move {
+                                            match client.get_task_list(&app_id, sid, aid).await {
+                                                Ok(tasks) => {
+                                                    let _ =
+                                                        tx.send(Action::TaskDataLoaded(sid, tasks));
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(Action::TaskFetchFailed(
+                                                        sid,
+                                                        e.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ViewMode::SqlDetail | ViewMode::StageDetail => {
                 // No deeper drill-down
             }
         }
@@ -251,18 +357,35 @@ impl App {
     }
 
     fn render(&mut self, f: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // tab bar
-                Constraint::Fill(1),   // content area
-                Constraint::Length(1), // status bar
-            ])
-            .split(f.area());
+        let show_summary = self.view_mode == ViewMode::List && self.data.is_some();
+        let chunks = if show_summary {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // tab bar
+                    Constraint::Length(2), // summary bar
+                    Constraint::Fill(1),   // content area
+                    Constraint::Length(1), // status bar
+                ])
+                .split(f.area())
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // tab bar
+                    Constraint::Length(0), // no summary bar
+                    Constraint::Fill(1),   // content area
+                    Constraint::Length(1), // status bar
+                ])
+                .split(f.area())
+        };
 
         self.render_tab_bar(f, chunks[0]);
-        self.render_content(f, chunks[1]);
-        self.render_status_bar(f, chunks[2]);
+        if show_summary && let Some(data) = &self.data {
+            summary_bar::render_summary_bar(f, chunks[1], &data.summary);
+        }
+        self.render_content(f, chunks[2]);
+        self.render_status_bar(f, chunks[3]);
     }
 
     fn render_tab_bar(&self, f: &mut Frame, area: Rect) {
@@ -332,6 +455,42 @@ impl App {
                         self.view_mode = ViewMode::List;
                     }
                 }
+                ViewMode::StageDetail => {
+                    if let Some(job_idx) = self.job_table_state.selected() {
+                        if let Some(job) = data.jobs.get(job_idx) {
+                            if let Some(stage_idx) = self.detail_table_state.selected() {
+                                let job_stages: Vec<&crate::fetch::types::SparkStage> = data
+                                    .stages
+                                    .iter()
+                                    .filter(|s| job.stage_ids.contains(&s.stage_id))
+                                    .collect();
+                                if let Some(stage) = job_stages.get(stage_idx) {
+                                    let tasks =
+                                        data.stage_tasks.get(&stage.stage_id).map(|v| v.as_slice());
+                                    let loading =
+                                        self.pending_task_fetches.contains(&stage.stage_id);
+                                    jobs::render_stage_detail(
+                                        f,
+                                        area,
+                                        stage,
+                                        tasks,
+                                        loading,
+                                        self.stage_detail_scroll,
+                                        data.cluster_resources.total_executor_memory,
+                                    );
+                                } else {
+                                    self.view_mode = ViewMode::JobDetail;
+                                }
+                            } else {
+                                self.view_mode = ViewMode::JobDetail;
+                            }
+                        } else {
+                            self.view_mode = ViewMode::List;
+                        }
+                    } else {
+                        self.view_mode = ViewMode::List;
+                    }
+                }
             },
             None => {
                 let msg = if self.error_msg.is_some() {
@@ -359,8 +518,9 @@ impl App {
 
         let hint = match self.view_mode {
             ViewMode::List => "q:quit Tab:switch j/k:nav Enter:detail",
-            ViewMode::JobDetail => "Esc:back j/k:nav s:sql q:quit",
+            ViewMode::JobDetail => "Esc:back j/k:nav Enter:stage s:sql q:quit",
             ViewMode::SqlDetail => "Esc:back j/k:scroll g/G:top/bottom q:quit",
+            ViewMode::StageDetail => "Esc:back j/k:scroll g/G:top/bottom q:quit",
         };
 
         status_line::render_status_line(
