@@ -11,6 +11,22 @@ use syntect::{
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
+/// Sanitize a span's text for terminal rendering.
+/// Replaces tab characters with spaces and strips other control characters
+/// that would desynchronize ratatui's buffer model from the terminal display.
+fn sanitize_span_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\t' => out.push_str("    "),
+            '\n' | '\r' => {}
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Highlight SQL text using syntect with base16-ocean.dark theme.
 pub fn highlight_sql(sql_text: &str) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
@@ -26,7 +42,7 @@ pub fn highlight_sql(sql_text: &str) -> Vec<Line<'static>> {
 
     for line in LinesWithEndings::from(sql_text) {
         let Ok(ranges) = highlighter.highlight_line(line, ss) else {
-            lines.push(Line::from(Span::raw(line.to_string())));
+            lines.push(Line::from(Span::raw(sanitize_span_text(line))));
             continue;
         };
 
@@ -35,7 +51,7 @@ pub fn highlight_sql(sql_text: &str) -> Vec<Line<'static>> {
             .map(|(style, text)| {
                 let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                 let ratatui_style = Style::default().fg(fg);
-                Span::styled(text.to_string(), ratatui_style)
+                Span::styled(sanitize_span_text(text), ratatui_style)
             })
             .collect();
 
@@ -96,6 +112,14 @@ const PLAN_KEYWORDS: &[&str] = &[
     "Window",
     "WindowExec",
     "WindowGroupLimit",
+    // Python UDF nodes
+    "ArrowEvalPython",
+    "BatchEvalPython",
+    "FlatMapGroupsInPandas",
+    "MapInPandas",
+    "PythonUDF",
+    "PythonUDAF",
+    "PythonUDTF",
 ];
 
 fn highlight_plan_line(line: &str) -> Line<'static> {

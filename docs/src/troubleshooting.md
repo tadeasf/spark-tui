@@ -70,6 +70,12 @@ spark-tui installs a panic hook that attempts to restore the terminal on panic, 
 
 spark-tui uses 256-color mode via ratatui/crossterm. Ensure your terminal emulator supports 256 colors and that `TERM` is set correctly (e.g., `xterm-256color`).
 
+## SQL Rendering Artifacts
+
+If SQL plan text appears corrupted or causes display glitches, this is likely caused by raw newlines embedded in SQL text. spark-tui sanitizes these via `sanitize_for_span()` in `util/format.rs`, which replaces embedded `\n`, `\r`, and `\t` characters with spaces before passing text to ratatui's `Line`/`Span` types. Ratatui's differential renderer tracks cursor positions per line, so embedded newlines corrupt its state.
+
+If you encounter rendering artifacts, check whether the SQL text contains unusual control characters and file an issue.
+
 ## Deserialization Errors
 
 If the log shows deserialization errors, the Spark API may have returned an unexpected response format. This can happen with:

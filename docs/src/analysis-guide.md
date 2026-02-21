@@ -174,6 +174,82 @@ Detects stages where a single executor handles a disproportionate share of data.
 
 Check data locality and partition assignment. This may indicate skewed partition-to-executor mapping.
 
+### Too Many Partitions
+
+Detects stages with excessive small partitions, causing high scheduling overhead.
+
+**How it works:**
+
+1. Computes `avg_bytes_per_task = (input_bytes + shuffle_read_bytes) / num_tasks`
+2. Flags stages with too many tiny partitions
+
+| Severity | Threshold |
+|----------|-----------|
+| Warning | `num_tasks > 10,000` **and** `avg_bytes_per_task < 1 MB` |
+
+The recommendation suggests a target partition count to achieve ~128 MB/partition: `df.coalesce(N)`.
+
+### Too Few Partitions
+
+Detects stages with too few large partitions, causing stragglers and underutilized executors.
+
+**How it works:**
+
+1. Computes `avg_bytes_per_task = (input_bytes + shuffle_read_bytes) / num_tasks`
+2. Flags stages with too few large partitions
+
+| Severity | Threshold |
+|----------|-----------|
+| Warning | `num_tasks ≤ 8` **and** `avg_bytes_per_task > 1 GB` |
+
+The recommendation suggests a target partition count: `df.repartition(N)`.
+
+### Broadcast Join Opportunity
+
+Detects shuffle joins where one side is small enough to broadcast, eliminating the shuffle entirely.
+
+**How it works:**
+
+1. Filters stages with `shuffle_write_bytes < 100 MB` and `executor_run_time > 5s`
+2. Checks if the SQL plan contains join indicators (`SortMerge`, `ShuffledHash`, `Join`)
+
+| Severity | Threshold |
+|----------|-----------|
+| Warning | `shuffle_write < 100 MB` **and** join detected in SQL plan |
+
+**Recommendation:** `from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), on='key')`.
+
+### Python UDF
+
+Detects Python UDF usage in SQL plans, which causes row-by-row serialization overhead.
+
+**How it works:**
+
+1. Searches the SQL plan hint for markers: `ArrowEvalPython`, `BatchEvalPython`, `PythonUDF`, `PythonRunner`
+2. If the stage is also CPU-bound (ratio > 0.9, runtime > 30s), severity escalates to Critical
+
+| Severity | Threshold |
+|----------|-----------|
+| Warning | Python UDF marker found in plan, `runtime > 5s` |
+| Critical | Python UDF + CPU ratio > 0.9 + `runtime > 30s` |
+
+**Recommendation:** Replace `@udf` with `@pandas_udf` for vectorized execution, or use native `F.when()`/`F.expr()` functions.
+
+### Cache Opportunity
+
+Detects repeated computations (stages with the same name) that could benefit from caching.
+
+**How it works:**
+
+1. Groups completed stages by cleaned name
+2. Flags groups where ≥ 2 stages share a name and total runtime > 30s
+
+| Severity | Threshold |
+|----------|-----------|
+| Warning | ≥ 2 stages with same name, total `runtime > 30s` |
+
+**Recommendation:** `df.cache()` or `df.persist(StorageLevel.MEMORY_AND_DISK)` before the first action. Call `df.unpersist()` when no longer needed.
+
 ## Bottleneck Classification
 
 When a slow stage or spill suspect is detected, spark-tui classifies the **root cause** based on I/O patterns:
@@ -189,24 +265,52 @@ If none of these patterns match, no bottleneck tag is shown.
 
 ## Recommendations
 
-Each suspect includes a recommendation based on its category and bottleneck pattern:
+All recommendations use PySpark-specific syntax for immediate applicability. Each suspect includes a recommendation based on its category and bottleneck pattern:
 
 | Category + Bottleneck | Recommendation |
 |-----------------------|----------------|
 | Data Skew | Repartition or salt skewed keys |
 | Data Size Skew | Repartition by a more uniform key or use salting |
 | Record Count Skew | Check for hot keys in joins or group-bys |
-| Disk Spill | Increase `spark.executor.memory` or reduce partition size |
-| CPU Bottleneck | Cache intermediate results, simplify UDFs, increase parallelism |
-| I/O Bottleneck | Increase memory, improve data locality, use faster storage, check GC pauses |
-| Record Explosion | Check for `explode()`, cross joins, or `generate()`; filter before expanding |
-| Task Failures | Check executor logs; common causes: OOM, data corruption, fetch failures |
-| Memory Pressure | Increase `spark.executor.memory` or `spark.executor.memoryOverhead`, reduce partition size |
+| Disk Spill | `spark.conf.set('spark.executor.memory', '8g')` or `df.repartition(200)` |
+| CPU Bottleneck | Replace `@udf` with `@pandas_udf` or native `F.when()`/`F.expr()`. Cache with `df.cache()` and increase parallelism |
+| I/O Bottleneck | `spark.conf.set('spark.executor.memory', '8g')`, cache hot DataFrames with `df.cache()`, or use `df.repartition()` for better locality |
+| Record Explosion | Filter before explode: `df.filter(...).select(explode('col'))`. Check for unintentional cross joins |
+| Task Failures | Check executor logs for OOM/fetch failures. `spark.conf.set('spark.task.maxFailures', '4')` |
+| Memory Pressure | `spark.conf.set('spark.executor.memory', '8g')` and `spark.conf.set('spark.executor.memoryOverhead', '2g')` |
 | Executor Hotspot | Check data locality and partition assignment |
-| Slow Stage + Large Scan | Add partition pruning or pushdown filters |
-| Slow Stage + Wide Shuffle | Reduce shuffle by filtering earlier or using broadcast joins |
-| Slow Stage + Data Explosion | Review `explode` calls or cross joins; filter before expanding |
-| Slow Stage (no pattern) | Check code location; large shuffle may indicate missing filters or broad joins |
+| Too Many Partitions | `df.coalesce(N)` to target ~128 MB/partition |
+| Too Few Partitions | `df.repartition(N)` to target ~128 MB/partition |
+| Broadcast Join Opportunity | `from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), on='key')` |
+| Python UDF | Replace `@udf` with `@pandas_udf` for vectorized execution, or use native `F.when()`/`F.expr()` |
+| Cache Opportunity | `df.cache()` or `df.persist(StorageLevel.MEMORY_AND_DISK)` before the first action |
+| Slow Stage + Large Scan | `df.filter(F.col('date') >= '2024-01-01')` and select only needed columns. Use partition pruning |
+| Slow Stage + Wide Shuffle | `from pyspark.sql.functions import broadcast; df.join(broadcast(small_df), ...)`. Pre-aggregate with `groupBy` before joins |
+| Slow Stage + Data Explosion | Filter before explode: `df.filter(...).withColumn('x', explode('arr'))` |
+| Slow Stage (no pattern) | `df.explain(True)` to see the query plan. Large shuffle may indicate missing filters or broad joins |
+
+## Estimated Savings
+
+Each suspect includes an `estimated_savings_ms` field — a rough estimate of how much time could be saved by addressing the issue. This is used as a secondary sort key (after severity) so that higher-impact issues appear first within the same severity level.
+
+### How savings are computed per category
+
+| Category | Estimation Method |
+|----------|-------------------|
+| Slow Stage | `executor_run_time - mean_runtime` (time above average) |
+| Disk Spill | ~30% of `executor_run_time` (spill overhead) |
+| CPU Bottleneck | ~20% of `executor_run_time` |
+| I/O Bottleneck | ~20% of `executor_run_time` |
+| Record Explosion | ~50% of `executor_run_time` |
+| Task Failures | `executor_run_time × failure_rate` (retry overhead) |
+| Memory Pressure | ~10% of `executor_run_time` (GC pause overhead) |
+| Too Many Partitions | ~40% of `executor_run_time` (scheduling overhead) |
+| Too Few Partitions | ~50% of `executor_run_time` (straggler overhead) |
+| Broadcast Join Opportunity | ~60% of `executor_run_time` (shuffle elimination) |
+| Python UDF | ~50% of `executor_run_time` (serialization overhead) |
+| Cache Opportunity | `total_runtime - min_single_runtime` (repeated computation) |
+
+These are heuristic estimates intended for prioritization, not precise predictions.
 
 ## SQL Correlation
 
@@ -232,7 +336,7 @@ Use this to understand the data flow through the flagged stage.
 
 ## Severity Sorting
 
-Suspects are sorted by severity (Critical first, then Warning), so the most important issues appear at the top of the Suspects tab.
+Suspects are sorted by severity (Critical first, then Warning), with `estimated_savings_ms` descending as a tiebreaker within the same severity level. The Suspects tab title reflects this: `"Suspects (severity → savings)"`.
 
 ## Color-Coding in Stage Detail
 

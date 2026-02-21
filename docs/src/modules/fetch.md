@@ -119,12 +119,15 @@ Fetches all data and runs analysis in a single poll cycle:
 2. Aggregate active executors into `ClusterResources` (total memory, cores, executor count)
 3. Build cross-reference maps (job↔SQL, stage↔job)
 4. Build ranked jobs (sorted by duration, running first)
-5. Run stage-level analysis (slow stages, spill, CPU efficiency, record explosion, task failures, memory pressure)
-6. Fetch task lists for top ~15 stages (selected by multiple heuristics)
-7. Run skew detection on fetched tasks (duration, data-size, record-count, executor hotspot)
-8. Aggregate and sort suspects
-9. Compute `HealthSummary` (job/IO counts, critical/warning counts, top issues)
-10. Return `DataPayload`
+5. Create a `SuspectContext` from the cross-reference maps
+6. Run 10 stage-level detectors via function pointer table (`detect_slow_stages`, `detect_spill`, `detect_cpu_efficiency`, `detect_record_explosion`, `detect_task_failures`, `detect_memory_pressure`, `detect_partition_count`, `detect_broadcast_join`, `detect_python_udf`, `detect_cache_opportunity`)
+7. Fetch task lists for top ~15 stages (selected by multiple heuristics)
+8. Run skew detection on fetched tasks (duration, data-size, record-count, executor hotspot)
+9. Aggregate and sort suspects (severity first, then `estimated_savings_ms` descending)
+10. Build `stage_sql_hints` — maps stage_id to top SQL plan operations
+11. Compute `critical_stages` — the longest wall-clock stage per job (critical path)
+12. Compute `HealthSummary` (job/IO counts, critical/warning counts, top issues)
+13. Return `DataPayload`
 
 ### `compute_health_summary`
 
@@ -150,8 +153,14 @@ pub struct DataPayload {
     pub stage_tasks: Arc<HashMap<i64, Vec<SparkTask>>>,
     pub summary: HealthSummary,
     pub cluster_resources: ClusterResources,
+    pub stage_sql_hints: Arc<HashMap<i64, String>>,
+    pub critical_stages: Arc<HashSet<i64>>,
     pub last_updated: String,
 }
 ```
 
-Note: `DataPayload` is defined in `src/tui/mod.rs` and contains all data needed to render the TUI, including `cluster_resources` for memory utilization color-coding.
+Note: `DataPayload` is defined in `src/tui/mod.rs` and contains all data needed to render the TUI.
+
+**New fields in v2:**
+- `stage_sql_hints` — maps `stage_id → String` with top SQL plan operations (e.g., "HashAggregate → Exchange → Scan parquet"), pre-computed for display in stage detail headers
+- `critical_stages` — set of stage IDs that represent the critical path (longest wall-clock stage per job), used for "CP" annotations in the job detail view

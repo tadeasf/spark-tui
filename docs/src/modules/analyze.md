@@ -10,7 +10,7 @@ Contains all performance analysis logic: suspect detection, bottleneck classific
 |------|---------|
 | `types.rs` | Core types: `Suspect`, `Severity`, `SuspectCategory`, `BottleneckPattern`, `RankedJob`, `SqlJobLink` |
 | `skew.rs` | Data skew detection using task-level metrics |
-| `suspects.rs` | Slow stage + spill detection, bottleneck classification, aggregation |
+| `suspects.rs` | `SuspectContext`, 10 stage-level detectors, bottleneck classification, aggregation |
 | `sql_linker.rs` | Cross-reference maps between jobs, stages, and SQL executions |
 
 ## `types.rs` — Core Types
@@ -41,6 +41,11 @@ pub enum SuspectCategory {
     TaskFailures,
     MemoryPressure,
     ExecutorHotspot,
+    TooManyPartitions,
+    TooFewPartitions,
+    BroadcastJoinOpportunity,
+    PythonUdf,
+    CacheOpportunity,
 }
 ```
 
@@ -72,8 +77,11 @@ pub struct Suspect {
     pub recommendation: Option<String>,
     pub bottleneck: Option<BottleneckPattern>,
     pub sql_plan_hint: Option<String>,
+    pub estimated_savings_ms: i64,
 }
 ```
+
+The `estimated_savings_ms` field contains a heuristic estimate of time savings from fixing the issue. It is used as a secondary sort key (after severity) in `aggregate_suspects`.
 
 ### `RankedJob`
 
@@ -132,89 +140,119 @@ Detects all forms of skew in a stage's tasks. Returns a `Vec<Suspect>` covering 
 
 ## `suspects.rs` — Stage-Level Detection
 
-### `detect_slow_stages`
+### Constants
+
+| Constant | Value |
+|----------|-------|
+| `ONE_MB` | 1,048,576 bytes |
+| `FIFTY_MB` | 52,428,800 bytes |
+| `ONE_HUNDRED_MB` | 104,857,600 bytes |
+| `FIVE_HUNDRED_MB` | 524,288,000 bytes |
+| `ONE_GB` | 1,073,741,824 bytes |
+
+### `SuspectContext`
+
+Holds all lookup maps needed by suspect detectors, eliminating repetitive parameter passing.
 
 ```rust
-pub fn detect_slow_stages(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
+pub struct SuspectContext<'a> {
+    pub stage_to_job: &'a HashMap<i64, i64>,
+    pub job_to_sql: &'a HashMap<i64, i64>,
+    pub sql_descriptions: &'a HashMap<i64, String>,
+    pub sql_plans: &'a HashMap<i64, String>,
+}
 ```
 
-Flags stages with `executor_run_time` exceeding `mean + 2*stddev` (warning) or `mean + 4*stddev` (critical).
+**Constructor:**
+
+```rust
+pub fn new(
+    stage_to_job: &'a HashMap<i64, i64>,
+    job_to_sql: &'a HashMap<i64, i64>,
+    sql_descriptions: &'a HashMap<i64, String>,
+    sql_plans: &'a HashMap<i64, String>,
+) -> Self
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `job_id` | `(&self, stage_id: i64) -> Option<i64>` | Look up the job_id for a stage |
+| `resolve_sql` | `(&self, stage_id: i64) -> (Option<i64>, Option<String>)` | Resolve SQL id and description for a stage via its job (private) |
+| `resolve_plan_hint_for` | `(&self, stage_id: i64) -> Option<String>` | Resolve top SQL plan operations for a stage (e.g., "HashAggregate → Exchange → Scan") |
+| `enrich` | `(&self, suspect: &mut Suspect, stage: &SparkStage)` | Enrich a suspect with stage_name, SQL linkage, I/O summary, and plan hint |
+
+### Stage-Level Detectors
+
+All 10 stage-level detectors share the same signature:
+
+```rust
+pub fn detect_*(stages: &[SparkStage], ctx: &SuspectContext) -> Vec<Suspect>
+```
+
+They are dispatched via a function pointer table in the poller:
+
+```rust
+type DetectorFn = fn(&[SparkStage], &SuspectContext) -> Vec<Suspect>;
+let detectors: &[DetectorFn] = &[
+    detect_slow_stages,
+    detect_spill,
+    detect_cpu_efficiency,
+    detect_record_explosion,
+    detect_task_failures,
+    detect_memory_pressure,
+    detect_partition_count,
+    detect_broadcast_join,
+    detect_python_udf,
+    detect_cache_opportunity,
+];
+```
+
+### `detect_slow_stages`
+
+Flags stages with `executor_run_time` exceeding `mean + 2*stddev` (warning) or `mean + 4*stddev` (critical). Sets `estimated_savings_ms` to time above mean.
 
 ### `detect_spill`
 
-```rust
-pub fn detect_spill(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
-```
-
-Flags stages with `disk_bytes_spilled > 0` (warning) or `> 1 GB` (critical).
+Flags stages with `disk_bytes_spilled > 0` (warning) or `> 1 GB` (critical). Estimates ~30% of runtime as spill overhead.
 
 ### `detect_cpu_efficiency`
 
-```rust
-pub fn detect_cpu_efficiency(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
-```
-
-Detects CPU efficiency issues. Computes `cpu_ratio = (executor_cpu_time / 1_000_000) / executor_run_time`. Low ratio (< 0.3, runtime > 10s) → I/O bottleneck; high ratio (> 0.9, runtime > 30s) → CPU saturated.
+Detects CPU efficiency issues. Computes `cpu_ratio = (executor_cpu_time / 1_000_000) / executor_run_time`. Low ratio (< 0.3, runtime > 10s) → I/O bottleneck; high ratio (> 0.9, runtime > 30s) → CPU saturated. Estimates ~20% savings.
 
 ### `detect_record_explosion`
 
-```rust
-pub fn detect_record_explosion(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
-```
-
-Detects stages where `output_records > 10x input_records` (with `input_records > 1000`).
+Detects stages where `output_records > 10x input_records` (with `input_records > 1000`). Estimates ~50% savings.
 
 ### `detect_task_failures`
 
-```rust
-pub fn detect_task_failures(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
-```
-
-Detects stages with task failures or killed tasks.
+Detects stages with task failures or killed tasks. Estimates savings proportional to failure rate.
 
 ### `detect_memory_pressure`
 
-```rust
-pub fn detect_memory_pressure(
-    stages: &[SparkStage],
-    stage_to_job: &HashMap<i64, i64>,
-    job_to_sql: &HashMap<i64, i64>,
-    sql_descriptions: &HashMap<i64, String>,
-    sql_plans: &HashMap<i64, String>,
-) -> Vec<Suspect>
-```
+Detects memory pressure: `memory_bytes_spilled > 50 MB` but `disk_bytes_spilled == 0`. Estimates ~10% savings from GC overhead.
 
-Detects memory pressure: `memory_bytes_spilled > 50 MB` but `disk_bytes_spilled == 0`. This is a proactive warning before disk spill happens.
+### `detect_partition_count`
+
+Detects partition count issues. Two sub-categories:
+
+- **TooManyPartitions**: `num_tasks > 10,000` and `avg_bytes_per_task < 1 MB`. Estimates ~40% savings from scheduling overhead.
+- **TooFewPartitions**: `num_tasks ≤ 8` and `avg_bytes_per_task > 1 GB`. Estimates ~50% savings from straggler elimination.
+
+Recommendations include a computed target partition count for ~128 MB/partition.
+
+### `detect_broadcast_join`
+
+Detects shuffle joins where one side is small enough to broadcast. Triggers when `shuffle_write_bytes < 100 MB`, `executor_run_time > 5s`, and the SQL plan hint contains join indicators (`SortMerge`, `ShuffledHash`, `Join`). Estimates ~60% savings from shuffle elimination.
+
+### `detect_python_udf`
+
+Detects Python UDFs in SQL plans by searching for markers: `ArrowEvalPython`, `BatchEvalPython`, `PythonUDF`, `PythonRunner`. Escalates to Critical severity if also CPU-bound (ratio > 0.9, runtime > 30s). Estimates ~50% savings.
+
+### `detect_cache_opportunity`
+
+Detects repeated computations by grouping completed stages by cleaned name. Triggers when ≥ 2 stages share a name and total runtime > 30s. Savings estimated as `total_runtime - min_single_runtime`.
 
 ### `classify_bottleneck`
 
@@ -233,19 +271,20 @@ Classifies root cause based on I/O patterns:
 ### `aggregate_suspects`
 
 ```rust
-pub fn aggregate_suspects(suspects: Vec<Suspect>) -> Vec<Suspect>
+pub fn aggregate_suspects(mut suspects: Vec<Suspect>) -> Vec<Suspect>
 ```
 
-Sorts suspects by severity (Critical first).
+Sorts suspects by severity (Critical first), then by `estimated_savings_ms` descending as a tiebreaker.
 
 ### Helper Functions
 
 | Function | Description |
 |----------|-------------|
-| `bottleneck_recommendation(b)` | Returns a recommendation string for a bottleneck pattern |
-| `resolve_plan_hint(stage_id, ...)` | Extracts top SQL plan operations for a stage |
-| `stage_io_summary(s)` | Formats I/O metrics for a stage |
-| `resolve_sql(stage_id, ...)` | Resolves SQL ID and description for a stage |
+| `classify_bottleneck(s)` | Classifies root-cause bottleneck pattern for a stage |
+| `bottleneck_recommendation(b)` | Returns a PySpark-specific recommendation string for a bottleneck pattern |
+| `stage_io_summary(s)` | Formats I/O metrics for a stage (including in:out ratio) |
+
+Note: `resolve_sql` and `resolve_plan_hint_for` are now methods on `SuspectContext` (see above).
 
 ## `sql_linker.rs` — Cross-Reference Maps
 

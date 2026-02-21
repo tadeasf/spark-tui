@@ -10,8 +10,9 @@ use crate::analyze::sql_linker::{
     build_job_to_sql_map, build_stage_to_job_map, find_sql_for_job, stages_for_task_analysis,
 };
 use crate::analyze::suspects::{
-    aggregate_suspects, detect_cpu_efficiency, detect_memory_pressure, detect_record_explosion,
-    detect_slow_stages, detect_spill, detect_task_failures,
+    SuspectContext, aggregate_suspects, detect_broadcast_join, detect_cache_opportunity,
+    detect_cpu_efficiency, detect_memory_pressure, detect_partition_count, detect_python_udf,
+    detect_record_explosion, detect_slow_stages, detect_spill, detect_task_failures,
 };
 use crate::analyze::types::{HealthSummary, RankedJob, Severity};
 use crate::fetch::client::SparkHttpClient;
@@ -137,57 +138,32 @@ async fn poll_once(
         .collect();
 
     // Sort: running jobs first (no duration), then by duration descending
-    ranked_jobs.sort_by(|a, b| match (&a.duration_ms, &b.duration_ms) {
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-        (Some(a_ms), Some(b_ms)) => b_ms.cmp(a_ms),
-    });
+    ranked_jobs.sort_by_key(|j| std::cmp::Reverse(j.duration_ms));
+
+    // Build suspect context with all lookup maps
+    let ctx = SuspectContext::new(&stage_to_job, &job_to_sql, &sql_descriptions, &sql_plans);
 
     // Stage-level analysis (no extra API calls)
-    let mut all_suspects = Vec::new();
-    all_suspects.extend(detect_slow_stages(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
-    all_suspects.extend(detect_spill(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
-    all_suspects.extend(detect_cpu_efficiency(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
-    all_suspects.extend(detect_record_explosion(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
-    all_suspects.extend(detect_task_failures(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
-    all_suspects.extend(detect_memory_pressure(
-        &stages,
-        &stage_to_job,
-        &job_to_sql,
-        &sql_descriptions,
-        &sql_plans,
-    ));
+    type DetectorFn = fn(
+        &[crate::fetch::types::SparkStage],
+        &SuspectContext,
+    ) -> Vec<crate::analyze::types::Suspect>;
+    let detectors: &[DetectorFn] = &[
+        detect_slow_stages,
+        detect_spill,
+        detect_cpu_efficiency,
+        detect_record_explosion,
+        detect_task_failures,
+        detect_memory_pressure,
+        detect_partition_count,
+        detect_broadcast_join,
+        detect_python_udf,
+        detect_cache_opportunity,
+    ];
+    let mut all_suspects: Vec<crate::analyze::types::Suspect> = detectors
+        .iter()
+        .flat_map(|detect| detect(&stages, &ctx))
+        .collect();
 
     // Fetch task lists for stages selected by heuristic analysis
     let top_stages = stages_for_task_analysis(&stages);
@@ -195,7 +171,7 @@ async fn poll_once(
     for (stage_id, attempt_id) in &top_stages {
         match client.get_task_list(app_id, *stage_id, *attempt_id).await {
             Ok(tasks) => {
-                let job_id = stage_to_job.get(stage_id).copied();
+                let job_id = ctx.job_id(*stage_id);
                 let sname = stage_names.get(stage_id).copied();
                 let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
                 let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid));
@@ -207,17 +183,11 @@ async fn poll_once(
                     sql_id,
                     sql_desc.map(|s| s.as_str()),
                 );
-                // Enrich with sql_plan_hint
-                #[allow(clippy::collapsible_if)]
-                if let Some(sid) = sql_id {
-                    if let Some(plan) = sql_plans.get(&sid) {
-                        let ops = crate::util::format::parse_plan_top_operations(plan, 3);
-                        if !ops.is_empty() {
-                            let hint = ops.join(" → ");
-                            for suspect in &mut skew_suspects {
-                                suspect.sql_plan_hint = Some(hint.clone());
-                            }
-                        }
+                // Enrich with sql_plan_hint from context
+                let hint = ctx.resolve_plan_hint_for(*stage_id);
+                if let Some(h) = &hint {
+                    for suspect in &mut skew_suspects {
+                        suspect.sql_plan_hint = Some(h.clone());
                     }
                 }
                 all_suspects.extend(skew_suspects);
@@ -235,6 +205,34 @@ async fn poll_once(
 
     let suspects = aggregate_suspects(all_suspects);
 
+    // Pre-compute SQL plan hints for each stage
+    let stage_sql_hints: HashMap<i64, String> = stages
+        .iter()
+        .filter_map(|s| {
+            ctx.resolve_plan_hint_for(s.stage_id)
+                .map(|hint| (s.stage_id, hint))
+        })
+        .collect();
+
+    // Compute critical path: for each job, find the stage with longest runtime
+    let critical_stages: std::collections::HashSet<i64> = ranked_jobs
+        .iter()
+        .filter_map(|job| {
+            let job_stages: Vec<_> = stages
+                .iter()
+                .filter(|s| job.stage_ids.contains(&s.stage_id))
+                .collect();
+            job_stages
+                .iter()
+                .filter_map(|s| {
+                    duration_between(s.submission_time.as_deref(), s.completion_time.as_deref())
+                        .map(|ms| (s.stage_id, ms))
+                })
+                .max_by_key(|(_, ms)| *ms)
+                .map(|(id, _)| id)
+        })
+        .collect();
+
     // Compute health summary
     let summary = compute_health_summary(&ranked_jobs, &stages, &suspects);
 
@@ -249,6 +247,8 @@ async fn poll_once(
         stage_tasks: std::sync::Arc::new(stage_tasks),
         summary,
         cluster_resources,
+        stage_sql_hints: std::sync::Arc::new(stage_sql_hints),
+        critical_stages: std::sync::Arc::new(critical_stages),
         last_updated: now,
     })
 }

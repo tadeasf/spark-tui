@@ -1,9 +1,11 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect, Size},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
+use tui_scrollview::{ScrollView, ScrollViewState};
 
 use std::collections::HashMap;
 
@@ -11,7 +13,8 @@ use crate::analyze::types::RankedJob;
 use crate::fetch::types::{SparkSqlExecution, SparkStage, SparkTask};
 use crate::tui::{highlight, theme};
 use crate::util::format::{
-    clean_stage_name, format_bytes, format_duration_ms, format_records, percentile, truncate,
+    clean_stage_name, format_bytes, format_bytes_or_dash, format_duration_ms, format_records,
+    percentile, sanitize_for_span, truncate,
 };
 use crate::util::time::{duration_between, parse_spark_timestamp};
 
@@ -96,6 +99,7 @@ pub fn render_job_detail(
     stages: &[SparkStage],
     _sql_executions: &[SparkSqlExecution],
     stage_state: &mut TableState,
+    critical_stages: &std::collections::HashSet<i64>,
 ) {
     let duration_str = match job.duration_ms {
         Some(ms) => format_duration_ms(ms),
@@ -141,32 +145,43 @@ pub fn render_job_detail(
     let header_block = Block::default()
         .borders(Borders::ALL)
         .title(format!("Job #{}", job.job_id));
-    let header_para = Paragraph::new(header_lines).block(header_block);
+    let header_para = Paragraph::new(header_lines)
+        .block(header_block)
+        .wrap(Wrap { trim: true });
     f.render_widget(header_para, layout[0]);
 
     // -- SQL section --
     if has_sql {
         let sql_id = job.sql_id.unwrap();
-        let sql_desc = job.sql_description.as_deref().unwrap_or("(no description)");
+        let sql_desc_raw = job.sql_description.as_deref().unwrap_or("(no description)");
+        let sql_desc_clean = sanitize_for_span(sql_desc_raw);
 
         let mut sql_lines = vec![Line::from(vec![
             Span::styled(" SQL: ", theme::tab_active()),
-            Span::raw(format!("#{} — {}", sql_id, truncate(sql_desc, 70))),
+            Span::raw(format!("#{} — {}", sql_id, truncate(&sql_desc_clean, 70))),
         ])];
 
         // Show first few lines of plan_description
         if let Some(plan) = &job.sql_plan {
-            let plan_preview: String = plan.lines().take(2).collect::<Vec<_>>().join(" | ");
+            let first_line = plan.lines().next().unwrap_or("(empty plan)");
             sql_lines.push(Line::from(vec![
                 Span::styled(" Plan: ", theme::tab_active()),
-                Span::raw(truncate(&plan_preview, 80)),
+                Span::raw(truncate(first_line, 80)),
             ]));
+            if let Some(second_line) = plan.lines().nth(1) {
+                sql_lines.push(Line::from(vec![
+                    Span::raw("        "),
+                    Span::raw(truncate(second_line.trim_start(), 74)),
+                ]));
+            }
         }
 
         let sql_block = Block::default()
             .borders(Borders::ALL)
             .title(format!("SQL #{} [s:expand]", sql_id));
-        let sql_para = Paragraph::new(sql_lines).block(sql_block);
+        let sql_para = Paragraph::new(sql_lines)
+            .block(sql_block)
+            .wrap(Wrap { trim: true });
         f.render_widget(sql_para, layout[1]);
     }
 
@@ -211,36 +226,27 @@ pub fn render_job_detail(
                 None => "active".to_string(),
             };
 
-            let input_str = if s.input_bytes > 0 {
-                format_bytes(s.input_bytes)
+            let input_str = format_bytes_or_dash(s.input_bytes);
+            let output_str = format_bytes_or_dash(s.output_bytes);
+            let shuf_r_str = format_bytes_or_dash(s.shuffle_read_bytes);
+            let shuf_w_str = format_bytes_or_dash(s.shuffle_write_bytes);
+            let spill_str = format_bytes_or_dash(s.disk_bytes_spilled);
+
+            let name_str = if critical_stages.contains(&s.stage_id) {
+                format!("{} {}", truncate(clean_stage_name(&s.name), 27), "CP")
             } else {
-                "-".to_string()
+                truncate(clean_stage_name(&s.name), 30)
             };
-            let output_str = if s.output_bytes > 0 {
-                format_bytes(s.output_bytes)
+            let name_style = if critical_stages.contains(&s.stage_id) {
+                theme::critical()
             } else {
-                "-".to_string()
-            };
-            let shuf_r_str = if s.shuffle_read_bytes > 0 {
-                format_bytes(s.shuffle_read_bytes)
-            } else {
-                "-".to_string()
-            };
-            let shuf_w_str = if s.shuffle_write_bytes > 0 {
-                format_bytes(s.shuffle_write_bytes)
-            } else {
-                "-".to_string()
-            };
-            let spill_str = if s.disk_bytes_spilled > 0 {
-                format_bytes(s.disk_bytes_spilled)
-            } else {
-                "-".to_string()
+                Style::default()
             };
 
             Row::new(vec![
                 Cell::from(s.stage_id.to_string()),
                 Cell::from(status_str).style(status_style),
-                Cell::from(truncate(clean_stage_name(&s.name), 30)),
+                Cell::from(name_str).style(name_style),
                 Cell::from(dur_str),
                 Cell::from(s.num_tasks.to_string()),
                 Cell::from(input_str).style(theme::metric_bytes_style(s.input_bytes)),
@@ -274,12 +280,48 @@ pub fn render_job_detail(
     f.render_stateful_widget(stage_table, layout[2], stage_state);
 }
 
-pub fn render_sql_detail(f: &mut Frame, area: Rect, job: &RankedJob, scroll: u16) {
+pub fn render_sql_detail(
+    f: &mut Frame,
+    area: Rect,
+    job: &RankedJob,
+    scroll_state: &mut ScrollViewState,
+    suspects: &[crate::analyze::types::Suspect],
+) {
     let sql_id = job.sql_id.unwrap_or(0);
     let sql_desc = job.sql_description.as_deref().unwrap_or("(no description)");
     let sql_plan = job.sql_plan.as_deref().unwrap_or("(no plan available)");
 
     let mut lines: Vec<Line> = Vec::new();
+
+    // Show recommendations for this SQL query at the top
+    let sql_suspects: Vec<&crate::analyze::types::Suspect> = suspects
+        .iter()
+        .filter(|s| s.sql_id == job.sql_id && job.sql_id.is_some())
+        .collect();
+
+    if !sql_suspects.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Recommendations:",
+            theme::tab_active(),
+        )));
+        for s in &sql_suspects {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", s.severity),
+                    theme::severity_style(s.severity),
+                ),
+                Span::styled(format!("[Stage {}] ", s.stage_id), theme::muted()),
+                Span::raw(&s.title),
+            ]));
+            if let Some(rec) = &s.recommendation {
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(rec, theme::healthy()),
+                ]));
+            }
+        }
+        lines.push(Line::from(""));
+    }
 
     lines.push(Line::from(vec![Span::styled(
         "Description: ",
@@ -297,32 +339,30 @@ pub fn render_sql_detail(f: &mut Frame, area: Rect, job: &RankedJob, scroll: u16
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("SQL #{}", sql_id));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    // Clamp scroll to avoid overflow inside ratatui's Paragraph rendering
-    let content_height = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2); // subtract border
-    let max_scroll = content_height.saturating_sub(visible_height);
-    let clamped_scroll = scroll.min(max_scroll);
+    // Calculate wrapped content height
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let content_height = para.line_count(inner.width) as u16;
 
-    let para = Paragraph::new(lines)
-        .block(block)
-        .scroll((clamped_scroll, 0));
+    // Render into off-screen ScrollView buffer
+    let content_size = Size::new(inner.width, content_height);
+    let mut scroll_view = ScrollView::new(content_size);
+    scroll_view.render_widget(para, Rect::new(0, 0, inner.width, content_height));
 
-    f.render_widget(para, area);
+    // Render ScrollView viewport to frame
+    f.render_stateful_widget(scroll_view, inner, scroll_state);
 }
 
-pub fn render_stage_detail(
-    f: &mut Frame,
-    area: Rect,
-    stage: &SparkStage,
+fn render_stage_header<'a>(
+    stage: &'a SparkStage,
     tasks: Option<&[SparkTask]>,
-    loading: bool,
-    scroll: u16,
     total_cluster_memory: i64,
-) {
-    let mut lines: Vec<Line> = Vec::new();
+    sql_hint: Option<&str>,
+) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
 
-    // -- Stage summary header --
     let dur_str = match duration_between(
         stage.submission_time.as_deref(),
         stage.completion_time.as_deref(),
@@ -335,7 +375,7 @@ pub fn render_stage_detail(
     lines.push(Line::from(vec![
         Span::styled(format!(" Stage #{} ", stage.stage_id), theme::tab_active()),
         Span::raw("  "),
-        Span::styled(&status_str, theme::running()),
+        Span::styled(status_str, theme::running()),
         Span::raw("  "),
         Span::raw(format!("Duration: {}  Tasks: {}", dur_str, stage.num_tasks)),
     ]));
@@ -344,6 +384,14 @@ pub fn render_stage_detail(
         Span::styled(" Name: ", theme::tab_active()),
         Span::raw(clean_stage_name(&stage.name)),
     ]));
+
+    // SQL plan hint
+    if let Some(hint) = sql_hint {
+        lines.push(Line::from(vec![
+            Span::styled(" SQL:  ", theme::tab_active()),
+            Span::styled(hint.to_string(), theme::muted()),
+        ]));
+    }
 
     // I/O metrics
     let mut io_parts = Vec::new();
@@ -408,15 +456,11 @@ pub fn render_stage_detail(
     // Peak execution memory — stage-level with task-data fallback
     let peak_mem = if stage.peak_execution_memory > 0 {
         Some((stage.peak_execution_memory, "stage"))
-    } else if let Some(t) = tasks {
-        let max = t.iter().map(|t| t.peak_execution_memory).max().unwrap_or(0);
-        if max > 0 {
-            Some((max, "task max"))
-        } else {
-            None
-        }
     } else {
-        None
+        tasks
+            .and_then(|t| t.iter().map(|t| t.peak_execution_memory).max())
+            .filter(|&max| max > 0)
+            .map(|max| (max, "task max"))
     };
 
     if let Some((mem_bytes, source)) = peak_mem {
@@ -443,172 +487,207 @@ pub fn render_stage_detail(
         ]));
     }
 
+    lines
+}
+
+fn render_duration_histogram<'a>(durations: &[f64]) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+    if durations.len() < 2 {
+        return lines;
+    }
+
+    let min = durations[0];
+    let max = durations[durations.len() - 1];
+    let med = percentile(durations, 0.5);
+    let p90 = percentile(durations, 0.9);
+    let p99 = percentile(durations, 0.99);
+
+    lines.push(Line::from(Span::styled(
+        " Task Duration Distribution",
+        theme::tab_active(),
+    )));
+    lines.push(Line::from(format!(
+        "   min: {}  median: {}  p90: {}  p99: {}  max: {}",
+        format_duration_ms(min as i64),
+        format_duration_ms(med as i64),
+        format_duration_ms(p90 as i64),
+        format_duration_ms(p99 as i64),
+        format_duration_ms(max as i64),
+    )));
+
+    let range = max - min;
+    if range > 0.0 {
+        let num_buckets = 10;
+        let bucket_width = range / num_buckets as f64;
+        let mut buckets = vec![0usize; num_buckets];
+        for &d in durations {
+            let idx = ((d - min) / bucket_width).floor() as usize;
+            let idx = idx.min(num_buckets - 1);
+            buckets[idx] += 1;
+        }
+        let max_count = *buckets.iter().max().unwrap_or(&1);
+        let bar_max_width = 40;
+
+        lines.push(Line::from(""));
+        for (i, &count) in buckets.iter().enumerate() {
+            let lo = min + i as f64 * bucket_width;
+            let hi = lo + bucket_width;
+            let bar_len = if max_count > 0 {
+                (count as f64 / max_count as f64 * bar_max_width as f64) as usize
+            } else {
+                0
+            };
+            let bar: String = "█".repeat(bar_len) + &"░".repeat(bar_max_width - bar_len);
+            lines.push(Line::from(format!(
+                "   {:>8}-{:<8} |{bar}| {}",
+                format_duration_ms(lo as i64),
+                format_duration_ms(hi as i64),
+                count,
+            )));
+        }
+    }
+
+    lines
+}
+
+fn render_executor_breakdown<'a>(tasks: &[SparkTask]) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+
+    let mut exec_data: HashMap<&str, (i64, i64, i64)> = HashMap::new();
+    for t in tasks {
+        let entry = exec_data.entry(t.executor_id.as_str()).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += t.duration.unwrap_or(0);
+        entry.2 += t.input_bytes + t.shuffle_read_bytes;
+    }
+    let total_bytes: i64 = exec_data.values().map(|e| e.2).sum();
+
+    let mut exec_rows: Vec<(&str, i64, i64, i64, f64)> = exec_data
+        .into_iter()
+        .map(|(id, (count, dur, bytes))| {
+            let pct = if total_bytes > 0 {
+                bytes as f64 / total_bytes as f64 * 100.0
+            } else {
+                0.0
+            };
+            (id, count, dur, bytes, pct)
+        })
+        .collect();
+    exec_rows.sort_by(|a, b| b.4.total_cmp(&a.4));
+
+    lines.push(Line::from(Span::styled(
+        " Per-Executor Breakdown",
+        theme::tab_active(),
+    )));
+    lines.push(Line::from(format!(
+        "   {:<12} {:>6} {:>12} {:>12} {:>8}",
+        "Executor", "Tasks", "Avg Dur", "Bytes", "% Data"
+    )));
+
+    for (id, count, dur, bytes, pct) in &exec_rows {
+        let avg_dur = if *count > 0 { dur / count } else { 0 };
+        lines.push(Line::from(format!(
+            "   {:<12} {:>6} {:>12} {:>12} {:>7.1}%",
+            truncate(id, 12),
+            count,
+            format_duration_ms(avg_dur),
+            format_bytes(*bytes),
+            pct,
+        )));
+    }
+
+    lines
+}
+
+fn render_peak_memory_section<'a>(tasks: &[SparkTask], total_cluster_memory: i64) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+    let max_mem = tasks
+        .iter()
+        .map(|t| t.peak_execution_memory)
+        .max()
+        .unwrap_or(0);
+    if max_mem > 0 {
+        let total_mem: i64 = tasks.iter().map(|t| t.peak_execution_memory).sum();
+        let avg_mem = total_mem / tasks.len() as i64;
+        let mem_style = theme::memory_utilization_style(max_mem, total_cluster_memory);
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Peak Execution Memory (per task)",
+            theme::tab_active(),
+        )));
+        lines.push(Line::from(vec![
+            Span::raw("   max: "),
+            Span::styled(format_bytes(max_mem), mem_style),
+            Span::raw(format!(
+                "  avg: {}  total: {}",
+                format_bytes(avg_mem),
+                format_bytes(total_mem),
+            )),
+        ]));
+    }
+    lines
+}
+
+fn render_skew_metrics<'a>(durations: &[f64], tasks: &[SparkTask]) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+    if durations.len() < 2 {
+        return lines;
+    }
+
+    let n = durations.len() as f64;
+    let mean = durations.iter().sum::<f64>() / n;
+    let variance = durations.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n;
+    let stddev = variance.sqrt();
+    let cv = if mean > 0.0 { stddev / mean } else { 0.0 };
+    let median = percentile(durations, 0.5);
+    let max_val = durations.last().copied().unwrap_or(0.0);
+    let max_median_ratio = if median > 0.0 { max_val / median } else { 0.0 };
+
+    let slowest_task = tasks
+        .iter()
+        .max_by_key(|t| t.duration.unwrap_or(0))
+        .unwrap();
+
+    lines.push(Line::from(Span::styled(
+        " Skew Metrics",
+        theme::tab_active(),
+    )));
+    lines.push(Line::from(format!(
+        "   CV: {:.2}  Max/Median: {:.1}x  Slowest: task #{} on executor {}",
+        cv, max_median_ratio, slowest_task.task_id, slowest_task.executor_id,
+    )));
+
+    lines
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_stage_detail(
+    f: &mut Frame,
+    area: Rect,
+    stage: &SparkStage,
+    tasks: Option<&[SparkTask]>,
+    loading: bool,
+    scroll_state: &mut ScrollViewState,
+    total_cluster_memory: i64,
+    sql_hint: Option<&str>,
+) {
+    let mut lines = render_stage_header(stage, tasks, total_cluster_memory, sql_hint);
     lines.push(Line::from(""));
 
-    // -- Task analysis section --
     match tasks {
         Some(tasks) if tasks.len() >= 2 => {
-            // Duration histogram
             let mut durations: Vec<f64> = tasks
                 .iter()
                 .filter_map(|t| t.duration.map(|d| d as f64))
                 .collect();
-            durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            durations.sort_by(|a, b| a.total_cmp(b));
 
-            if durations.len() >= 2 {
-                let min = durations[0];
-                let max = durations[durations.len() - 1];
-                let med = percentile(&durations, 0.5);
-                let p90 = percentile(&durations, 0.9);
-                let p99 = percentile(&durations, 0.99);
-
-                lines.push(Line::from(Span::styled(
-                    " Task Duration Distribution",
-                    theme::tab_active(),
-                )));
-                lines.push(Line::from(format!(
-                    "   min: {}  median: {}  p90: {}  p99: {}  max: {}",
-                    format_duration_ms(min as i64),
-                    format_duration_ms(med as i64),
-                    format_duration_ms(p90 as i64),
-                    format_duration_ms(p99 as i64),
-                    format_duration_ms(max as i64),
-                )));
-
-                // Text-based histogram with 10 buckets
-                let range = max - min;
-                if range > 0.0 {
-                    let num_buckets = 10;
-                    let bucket_width = range / num_buckets as f64;
-                    let mut buckets = vec![0usize; num_buckets];
-                    for &d in &durations {
-                        let idx = ((d - min) / bucket_width).floor() as usize;
-                        let idx = idx.min(num_buckets - 1);
-                        buckets[idx] += 1;
-                    }
-                    let max_count = *buckets.iter().max().unwrap_or(&1);
-                    let bar_max_width = 40;
-
-                    lines.push(Line::from(""));
-                    for (i, &count) in buckets.iter().enumerate() {
-                        let lo = min + i as f64 * bucket_width;
-                        let hi = lo + bucket_width;
-                        let bar_len = if max_count > 0 {
-                            (count as f64 / max_count as f64 * bar_max_width as f64) as usize
-                        } else {
-                            0
-                        };
-                        let bar: String =
-                            "█".repeat(bar_len) + &"░".repeat(bar_max_width - bar_len);
-                        lines.push(Line::from(format!(
-                            "   {:>8}-{:<8} |{bar}| {}",
-                            format_duration_ms(lo as i64),
-                            format_duration_ms(hi as i64),
-                            count,
-                        )));
-                    }
-                }
-            }
-
+            lines.extend(render_duration_histogram(&durations));
             lines.push(Line::from(""));
-
-            // -- Per-executor breakdown --
-            let mut exec_data: HashMap<&str, (i64, i64, i64)> = HashMap::new();
-            for t in tasks {
-                let entry = exec_data.entry(t.executor_id.as_str()).or_insert((0, 0, 0));
-                entry.0 += 1; // task count
-                entry.1 += t.duration.unwrap_or(0); // total duration
-                entry.2 += t.input_bytes + t.shuffle_read_bytes; // total bytes
-            }
-            let total_bytes: i64 = exec_data.values().map(|e| e.2).sum();
-
-            let mut exec_rows: Vec<(&str, i64, i64, i64, f64)> = exec_data
-                .into_iter()
-                .map(|(id, (count, dur, bytes))| {
-                    let pct = if total_bytes > 0 {
-                        bytes as f64 / total_bytes as f64 * 100.0
-                    } else {
-                        0.0
-                    };
-                    (id, count, dur, bytes, pct)
-                })
-                .collect();
-            exec_rows.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap());
-
-            lines.push(Line::from(Span::styled(
-                " Per-Executor Breakdown",
-                theme::tab_active(),
-            )));
-            lines.push(Line::from(format!(
-                "   {:<12} {:>6} {:>12} {:>12} {:>8}",
-                "Executor", "Tasks", "Avg Dur", "Bytes", "% Data"
-            )));
-
-            for (id, count, dur, bytes, pct) in &exec_rows {
-                let avg_dur = if *count > 0 { dur / count } else { 0 };
-                lines.push(Line::from(format!(
-                    "   {:<12} {:>6} {:>12} {:>12} {:>7.1}%",
-                    truncate(id, 12),
-                    count,
-                    format_duration_ms(avg_dur),
-                    format_bytes(*bytes),
-                    pct,
-                )));
-            }
-
-            // -- Peak execution memory (task-level) --
-            let max_mem = tasks
-                .iter()
-                .map(|t| t.peak_execution_memory)
-                .max()
-                .unwrap_or(0);
-            if max_mem > 0 {
-                let total_mem: i64 = tasks.iter().map(|t| t.peak_execution_memory).sum();
-                let avg_mem = total_mem / tasks.len() as i64;
-                let mem_style = theme::memory_utilization_style(max_mem, total_cluster_memory);
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    " Peak Execution Memory (per task)",
-                    theme::tab_active(),
-                )));
-                lines.push(Line::from(vec![
-                    Span::raw("   max: "),
-                    Span::styled(format_bytes(max_mem), mem_style),
-                    Span::raw(format!(
-                        "  avg: {}  total: {}",
-                        format_bytes(avg_mem),
-                        format_bytes(total_mem),
-                    )),
-                ]));
-            }
-
+            lines.extend(render_executor_breakdown(tasks));
+            lines.extend(render_peak_memory_section(tasks, total_cluster_memory));
             lines.push(Line::from(""));
-
-            // -- Skew metrics --
-            if durations.len() >= 2 {
-                let n = durations.len() as f64;
-                let mean = durations.iter().sum::<f64>() / n;
-                let variance = durations.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n;
-                let stddev = variance.sqrt();
-                let cv = if mean > 0.0 { stddev / mean } else { 0.0 };
-                let median = percentile(&durations, 0.5);
-                let max_val = durations.last().copied().unwrap_or(0.0);
-                let max_median_ratio = if median > 0.0 { max_val / median } else { 0.0 };
-
-                let slowest_task = tasks
-                    .iter()
-                    .max_by_key(|t| t.duration.unwrap_or(0))
-                    .unwrap();
-
-                lines.push(Line::from(Span::styled(
-                    " Skew Metrics",
-                    theme::tab_active(),
-                )));
-                lines.push(Line::from(format!(
-                    "   CV: {:.2}  Max/Median: {:.1}x  Slowest: task #{} on executor {}",
-                    cv, max_median_ratio, slowest_task.task_id, slowest_task.executor_id,
-                )));
-            }
+            lines.extend(render_skew_metrics(&durations, tasks));
         }
         Some(_) => {
             lines.push(Line::from(Span::styled(
@@ -634,15 +713,18 @@ pub fn render_stage_detail(
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!("Stage #{} Detail", stage.stage_id));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    let content_height = lines.len() as u16;
-    let visible_height = area.height.saturating_sub(2);
-    let max_scroll = content_height.saturating_sub(visible_height);
-    let clamped_scroll = scroll.min(max_scroll);
+    // Calculate wrapped content height
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let content_height = para.line_count(inner.width) as u16;
 
-    let para = Paragraph::new(lines)
-        .block(block)
-        .scroll((clamped_scroll, 0));
+    // Render into off-screen ScrollView buffer
+    let content_size = Size::new(inner.width, content_height);
+    let mut scroll_view = ScrollView::new(content_size);
+    scroll_view.render_widget(para, Rect::new(0, 0, inner.width, content_height));
 
-    f.render_widget(para, area);
+    // Render ScrollView viewport to frame
+    f.render_stateful_widget(scroll_view, inner, scroll_state);
 }

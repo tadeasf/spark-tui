@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::analyze::types::HealthSummary;
@@ -52,18 +52,15 @@ pub fn render_summary_bar(f: &mut Frame, area: Rect, summary: &HealthSummary) {
     )]);
 
     // Line 2: Top critical issues or "No issues"
-    let line2 = if !summary.top_issues.is_empty() {
-        Line::from(vec![Span::styled(
-            format!(" Top: {}", summary.top_issues.join(", ")),
-            base_style,
-        )])
+    let line2_text = if !summary.top_issues.is_empty() {
+        format!(" Top: {}", summary.top_issues.join(", "))
     } else {
-        Line::from(vec![Span::styled(
-            " No critical issues detected".to_string(),
-            base_style,
-        )])
+        " No critical issues detected".to_string()
     };
+    let line2 = Line::from(vec![Span::styled(line2_text, base_style)]);
 
-    let para = Paragraph::new(vec![line1, line2]);
+    let para = Paragraph::new(vec![line1, line2])
+        .style(Style::default().bg(Color::Reset))
+        .wrap(Wrap { trim: true });
     f.render_widget(para, area);
 }

@@ -56,15 +56,14 @@ impl Config {
 
 /// Resolve config from CLI args > env vars (handled by clap) > ~/.databrickscfg.
 pub fn resolve_config() -> Result<Config, String> {
-    let args = CliArgs::parse();
+    let mut args = CliArgs::parse();
 
     // If all three are provided via CLI/env, we're done
-    if let (Some(host), Some(token), Some(cluster_id)) = (&args.host, &args.token, &args.cluster_id)
-    {
+    if args.host.is_some() && args.token.is_some() && args.cluster_id.is_some() {
         return Ok(Config {
-            host: host.clone(),
-            token: token.clone(),
-            cluster_id: cluster_id.clone(),
+            host: args.host.take().unwrap(),
+            token: args.token.take().unwrap(),
+            cluster_id: args.cluster_id.take().unwrap(),
             poll_interval: args.poll_interval,
         });
     }

@@ -1,0 +1,38 @@
+name: Auto Tag on Version Bump
+
+on:
+  push:
+    branches: [master]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version change
+        id: version
+        run: |
+          CURRENT=$(awk -F'"' '/^\[package\]/{found=1} found && /^version/{print $2; exit}' Cargo.toml)
+          git show HEAD~1:Cargo.toml > /tmp/old-cargo.toml 2>/dev/null || echo -e '[package]\nversion = "0.0.0"' > /tmp/old-cargo.toml
+          PREVIOUS=$(awk -F'"' '/^\[package\]/{found=1} found && /^version/{print $2; exit}' /tmp/old-cargo.toml)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" != "$PREVIOUS" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          TAG="v${{ steps.version.outputs.current }}"
+          git tag "$TAG"
+          git push origin "$TAG"

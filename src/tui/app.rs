@@ -5,17 +5,18 @@ use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Modifier,
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, TableState, Tabs},
+    widgets::{Block, Borders, Clear, TableState, Tabs},
 };
 use tokio::sync::mpsc;
 use tracing::warn;
+use tui_scrollview::ScrollViewState;
 
 use crate::fetch::client::SparkHttpClient;
 
 use super::tabs::{jobs, suspects};
-use super::widgets::{status_line, summary_bar};
+use super::widgets::{help, status_line, summary_bar};
 use super::{Action, DataPayload};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,11 +46,13 @@ impl Tab {
     }
 
     pub fn next(self) -> Self {
-        Tab::from_index((self.index() + 1) % 2)
+        let len = Tab::titles().len();
+        Tab::from_index((self.index() + 1) % len)
     }
 
     pub fn prev(self) -> Self {
-        Tab::from_index((self.index() + 1) % 2)
+        let len = Tab::titles().len();
+        Tab::from_index((self.index() + len - 1) % len)
     }
 }
 
@@ -64,15 +67,17 @@ pub enum ViewMode {
 pub struct App {
     pub active_tab: Tab,
     pub view_mode: ViewMode,
-    pub data: Option<DataPayload>,
+    pub data: Option<Arc<DataPayload>>,
     pub error_msg: Option<String>,
     pub cluster_id: String,
     pub should_quit: bool,
     pub job_table_state: TableState,
     pub suspect_table_state: TableState,
     pub detail_table_state: TableState,
-    pub sql_scroll: u16,
-    pub stage_detail_scroll: u16,
+    pub sql_scroll_state: ScrollViewState,
+    pub stage_detail_scroll_state: ScrollViewState,
+    show_help: bool,
+    return_tab: Option<Tab>,
     client: Arc<SparkHttpClient>,
     tx: mpsc::UnboundedSender<Action>,
     pending_task_fetches: HashSet<i64>,
@@ -94,8 +99,10 @@ impl App {
             job_table_state: TableState::default(),
             suspect_table_state: TableState::default(),
             detail_table_state: TableState::default(),
-            sql_scroll: 0,
-            stage_detail_scroll: 0,
+            sql_scroll_state: ScrollViewState::default(),
+            stage_detail_scroll_state: ScrollViewState::default(),
+            show_help: false,
+            return_tab: None,
             client,
             tx,
             pending_task_fetches: HashSet::new(),
@@ -142,19 +149,19 @@ impl App {
                     payload.stage_tasks = Arc::new(merged);
                 }
 
-                self.data = Some(payload);
+                self.data = Some(Arc::new(payload));
             }
             Action::FetchError(err) => {
                 self.error_msg = Some(err.to_string());
             }
             Action::TaskDataLoaded(stage_id, tasks) => {
                 self.pending_task_fetches.remove(&stage_id);
-                if let Some(data) = &self.data {
+                if let Some(arc_data) = self.data.take() {
+                    let mut data = Arc::unwrap_or_clone(arc_data);
                     let mut map = (*data.stage_tasks).clone();
                     map.insert(stage_id, tasks);
-                    let mut new_data = data.clone();
-                    new_data.stage_tasks = Arc::new(map);
-                    self.data = Some(new_data);
+                    data.stage_tasks = Arc::new(map);
+                    self.data = Some(Arc::new(data));
                 }
             }
             Action::TaskFetchFailed(stage_id, err) => {
@@ -178,14 +185,19 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        // When help overlay is shown, intercept keys
+        if self.show_help {
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Esc => self.show_help = false,
+                KeyCode::Char('q') => self.should_quit = true,
+                _ => {} // swallow all other keys
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Esc => match self.view_mode {
-                ViewMode::List => self.should_quit = true,
-                ViewMode::JobDetail => self.view_mode = ViewMode::List,
-                ViewMode::SqlDetail => self.view_mode = ViewMode::JobDetail,
-                ViewMode::StageDetail => self.view_mode = ViewMode::JobDetail,
-            },
+            KeyCode::Esc => self.handle_escape(),
             KeyCode::Tab if self.view_mode == ViewMode::List => {
                 self.active_tab = self.active_tab.next();
             }
@@ -193,69 +205,107 @@ impl App {
                 self.active_tab = self.active_tab.prev();
             }
             KeyCode::Char('s') if self.view_mode == ViewMode::JobDetail => {
-                // Open SQL detail if the selected job has sql_id
-                #[allow(clippy::collapsible_if)]
-                if let Some(data) = &self.data {
-                    if let Some(idx) = self.job_table_state.selected() {
-                        if let Some(job) = data.jobs.get(idx) {
-                            if job.sql_id.is_some() {
-                                self.sql_scroll = 0;
-                                self.view_mode = ViewMode::SqlDetail;
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.view_mode == ViewMode::SqlDetail => {
-                self.sql_scroll = self.sql_scroll.saturating_add(1);
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.view_mode == ViewMode::SqlDetail => {
-                self.sql_scroll = self.sql_scroll.saturating_sub(1);
-            }
-            KeyCode::Home | KeyCode::Char('g') if self.view_mode == ViewMode::SqlDetail => {
-                self.sql_scroll = 0;
-            }
-            KeyCode::End | KeyCode::Char('G') if self.view_mode == ViewMode::SqlDetail => {
-                self.sql_scroll = u16::MAX; // Will be clamped by Paragraph
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.view_mode == ViewMode::StageDetail => {
-                self.stage_detail_scroll = self.stage_detail_scroll.saturating_add(1);
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.view_mode == ViewMode::StageDetail => {
-                self.stage_detail_scroll = self.stage_detail_scroll.saturating_sub(1);
-            }
-            KeyCode::Home | KeyCode::Char('g') if self.view_mode == ViewMode::StageDetail => {
-                self.stage_detail_scroll = 0;
-            }
-            KeyCode::End | KeyCode::Char('G') if self.view_mode == ViewMode::StageDetail => {
-                self.stage_detail_scroll = u16::MAX;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(ts) = self.active_table_state() {
-                    ts.select_next();
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(ts) = self.active_table_state() {
-                    ts.select_previous();
-                }
-            }
-            KeyCode::Home | KeyCode::Char('g') => {
-                if let Some(ts) = self.active_table_state() {
-                    ts.select_first();
-                }
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                if let Some(ts) = self.active_table_state() {
-                    ts.select_last();
-                }
+                self.open_sql_detail();
             }
             KeyCode::Enter => self.handle_enter(),
+            KeyCode::Down | KeyCode::Char('j') => self.handle_navigation_down(),
+            KeyCode::Up | KeyCode::Char('k') => self.handle_navigation_up(),
+            KeyCode::Home | KeyCode::Char('g') => self.handle_navigation_home(),
+            KeyCode::End | KeyCode::Char('G') => self.handle_navigation_end(),
+            KeyCode::Char('h') => self.show_help = true,
             _ => {}
         }
     }
 
-    #[allow(clippy::collapsible_if)]
+    fn handle_escape(&mut self) {
+        match self.view_mode {
+            ViewMode::List => self.should_quit = true,
+            ViewMode::JobDetail => {
+                self.view_mode = ViewMode::List;
+                if let Some(tab) = self.return_tab.take() {
+                    self.active_tab = tab;
+                }
+            }
+            ViewMode::SqlDetail => self.view_mode = ViewMode::JobDetail,
+            ViewMode::StageDetail => self.view_mode = ViewMode::JobDetail,
+        }
+    }
+
+    fn open_sql_detail(&mut self) {
+        if let Some(data) = &self.data
+            && let Some(idx) = self.job_table_state.selected()
+            && let Some(job) = data.jobs.get(idx)
+            && job.sql_id.is_some()
+        {
+            self.sql_scroll_state = ScrollViewState::default();
+            self.view_mode = ViewMode::SqlDetail;
+        }
+    }
+
+    fn handle_navigation_down(&mut self) {
+        match self.view_mode {
+            ViewMode::SqlDetail => {
+                self.sql_scroll_state.scroll_down();
+            }
+            ViewMode::StageDetail => {
+                self.stage_detail_scroll_state.scroll_down();
+            }
+            _ => {
+                if let Some(ts) = self.active_table_state() {
+                    ts.select_next();
+                }
+            }
+        }
+    }
+
+    fn handle_navigation_up(&mut self) {
+        match self.view_mode {
+            ViewMode::SqlDetail => {
+                self.sql_scroll_state.scroll_up();
+            }
+            ViewMode::StageDetail => {
+                self.stage_detail_scroll_state.scroll_up();
+            }
+            _ => {
+                if let Some(ts) = self.active_table_state() {
+                    ts.select_previous();
+                }
+            }
+        }
+    }
+
+    fn handle_navigation_home(&mut self) {
+        match self.view_mode {
+            ViewMode::SqlDetail => {
+                self.sql_scroll_state.scroll_to_top();
+            }
+            ViewMode::StageDetail => {
+                self.stage_detail_scroll_state.scroll_to_top();
+            }
+            _ => {
+                if let Some(ts) = self.active_table_state() {
+                    ts.select_first();
+                }
+            }
+        }
+    }
+
+    fn handle_navigation_end(&mut self) {
+        match self.view_mode {
+            ViewMode::SqlDetail => {
+                self.sql_scroll_state.scroll_to_bottom();
+            }
+            ViewMode::StageDetail => {
+                self.stage_detail_scroll_state.scroll_to_bottom();
+            }
+            _ => {
+                if let Some(ts) = self.active_table_state() {
+                    ts.select_last();
+                }
+            }
+        }
+    }
+
     fn handle_enter(&mut self) {
         match self.view_mode {
             ViewMode::List => match self.active_tab {
@@ -266,77 +316,78 @@ impl App {
                         self.view_mode = ViewMode::JobDetail;
                     }
                 }
-                Tab::Suspects => {
-                    if let Some(idx) = self.suspect_table_state.selected() {
-                        if let Some(data) = &self.data {
-                            if let Some(suspect) = data.suspects.get(idx) {
-                                if let Some(job_id) = suspect.job_id {
-                                    if let Some(job_idx) =
-                                        data.jobs.iter().position(|j| j.job_id == job_id)
-                                    {
-                                        self.active_tab = Tab::Jobs;
-                                        self.job_table_state.select(Some(job_idx));
-                                        self.detail_table_state = TableState::default();
-                                        self.detail_table_state.select_first();
-                                        self.view_mode = ViewMode::JobDetail;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Tab::Suspects => self.enter_suspect_job(),
             },
-            ViewMode::JobDetail => {
-                // Enter on a stage → StageDetail
-                if let Some(stage_idx) = self.detail_table_state.selected() {
-                    if let Some(data) = &self.data {
-                        if let Some(job_idx) = self.job_table_state.selected() {
-                            if let Some(job) = data.jobs.get(job_idx) {
-                                // Verify the stage exists in this job
-                                let job_stages: Vec<&crate::fetch::types::SparkStage> = data
-                                    .stages
-                                    .iter()
-                                    .filter(|s| job.stage_ids.contains(&s.stage_id))
-                                    .collect();
-                                if let Some(stage) = job_stages.get(stage_idx) {
-                                    self.stage_detail_scroll = 0;
-                                    self.view_mode = ViewMode::StageDetail;
+            ViewMode::JobDetail => self.enter_stage_detail(),
+            ViewMode::SqlDetail | ViewMode::StageDetail => {}
+        }
+    }
 
-                                    // Trigger on-demand task fetch if not already loaded/pending
-                                    let sid = stage.stage_id;
-                                    let aid = stage.attempt_id;
-                                    if !data.stage_tasks.contains_key(&sid)
-                                        && !self.pending_task_fetches.contains(&sid)
-                                    {
-                                        self.pending_task_fetches.insert(sid);
-                                        let client = Arc::clone(&self.client);
-                                        let tx = self.tx.clone();
-                                        let app_id = data.app_id.clone();
-                                        tokio::spawn(async move {
-                                            match client.get_task_list(&app_id, sid, aid).await {
-                                                Ok(tasks) => {
-                                                    let _ =
-                                                        tx.send(Action::TaskDataLoaded(sid, tasks));
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(Action::TaskFetchFailed(
-                                                        sid,
-                                                        e.to_string(),
-                                                    ));
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+    fn enter_suspect_job(&mut self) {
+        let Some(idx) = self.suspect_table_state.selected() else {
+            return;
+        };
+        let Some(data) = &self.data else { return };
+        let Some(suspect) = data.suspects.get(idx) else {
+            return;
+        };
+        let Some(job_id) = suspect.job_id else { return };
+        let Some(job_idx) = data.jobs.iter().position(|j| j.job_id == job_id) else {
+            return;
+        };
+        self.return_tab = Some(self.active_tab);
+        self.active_tab = Tab::Jobs;
+        self.job_table_state.select(Some(job_idx));
+        self.detail_table_state = TableState::default();
+        self.detail_table_state.select_first();
+        self.view_mode = ViewMode::JobDetail;
+    }
+
+    fn enter_stage_detail(&mut self) {
+        let Some(stage_idx) = self.detail_table_state.selected() else {
+            return;
+        };
+        let Some(data) = &self.data else { return };
+        let Some(job_idx) = self.job_table_state.selected() else {
+            return;
+        };
+        let Some(job) = data.jobs.get(job_idx) else {
+            return;
+        };
+        let job_stages: Vec<&crate::fetch::types::SparkStage> = data
+            .stages
+            .iter()
+            .filter(|s| job.stage_ids.contains(&s.stage_id))
+            .collect();
+        let Some(stage) = job_stages.get(stage_idx) else {
+            return;
+        };
+        self.stage_detail_scroll_state = ScrollViewState::default();
+        self.view_mode = ViewMode::StageDetail;
+        self.trigger_task_fetch(stage.stage_id, stage.attempt_id, &data.app_id.clone());
+    }
+
+    fn trigger_task_fetch(&mut self, stage_id: i64, attempt_id: i64, app_id: &str) {
+        if let Some(data) = &self.data
+            && (data.stage_tasks.contains_key(&stage_id)
+                || self.pending_task_fetches.contains(&stage_id))
+        {
+            return;
+        }
+        self.pending_task_fetches.insert(stage_id);
+        let client = Arc::clone(&self.client);
+        let tx = self.tx.clone();
+        let app_id = app_id.to_string();
+        tokio::spawn(async move {
+            match client.get_task_list(&app_id, stage_id, attempt_id).await {
+                Ok(tasks) => {
+                    let _ = tx.send(Action::TaskDataLoaded(stage_id, tasks));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::TaskFetchFailed(stage_id, e.to_string()));
                 }
             }
-            ViewMode::SqlDetail | ViewMode::StageDetail => {
-                // No deeper drill-down
-            }
-        }
+        });
     }
 
     pub async fn run(
@@ -344,7 +395,17 @@ impl App {
         terminal: &mut ratatui::DefaultTerminal,
         mut rx: mpsc::UnboundedReceiver<Action>,
     ) -> std::io::Result<()> {
+        let mut prev_view = self.view_mode;
+        let mut prev_tab = self.active_tab;
+
         while !self.should_quit {
+            // Physical terminal clear only on view/tab transitions (not scroll)
+            if self.view_mode != prev_view || self.active_tab != prev_tab {
+                terminal.clear()?;
+                prev_view = self.view_mode;
+                prev_tab = self.active_tab;
+            }
+
             terminal.draw(|f| self.render(f))?;
 
             if let Some(action) = rx.recv().await {
@@ -357,6 +418,9 @@ impl App {
     }
 
     fn render(&mut self, f: &mut Frame) {
+        // Reset every cell in the buffer to prevent stale content
+        f.render_widget(Clear, f.area());
+
         let show_summary = self.view_mode == ViewMode::List && self.data.is_some();
         let chunks = if show_summary {
             Layout::default()
@@ -386,6 +450,20 @@ impl App {
         }
         self.render_content(f, chunks[2]);
         self.render_status_bar(f, chunks[3]);
+
+        if self.show_help {
+            match self.view_mode {
+                ViewMode::SqlDetail => {
+                    if let Some(data) = &self.data
+                        && let Some(idx) = self.job_table_state.selected()
+                        && let Some(job) = data.jobs.get(idx)
+                    {
+                        help::render_sql_help_overlay(f, f.area(), job, &data.suspects);
+                    }
+                }
+                _ => help::render_help_overlay(f, f.area()),
+            }
+        }
     }
 
     fn render_tab_bar(&self, f: &mut Frame, area: Rect) {
@@ -398,8 +476,8 @@ impl App {
             .block(Block::default().borders(Borders::ALL))
             .select(self.active_tab.index())
             .highlight_style(
-                ratatui::style::Style::default()
-                    .fg(ratatui::style::Color::Cyan)
+                Style::default()
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             );
 
@@ -422,6 +500,7 @@ impl App {
                             area,
                             &data.suspects,
                             &mut self.suspect_table_state,
+                            &data.critical_stages,
                         );
                     }
                 },
@@ -435,6 +514,7 @@ impl App {
                                 &data.stages,
                                 &data.sql_executions,
                                 &mut self.detail_table_state,
+                                &data.critical_stages,
                             );
                         } else {
                             // Selection out of bounds, revert
@@ -447,7 +527,13 @@ impl App {
                 ViewMode::SqlDetail => {
                     if let Some(idx) = self.job_table_state.selected() {
                         if let Some(job) = data.jobs.get(idx) {
-                            jobs::render_sql_detail(f, area, job, self.sql_scroll);
+                            jobs::render_sql_detail(
+                                f,
+                                area,
+                                job,
+                                &mut self.sql_scroll_state,
+                                &data.suspects,
+                            );
                         } else {
                             self.view_mode = ViewMode::List;
                         }
@@ -469,14 +555,19 @@ impl App {
                                         data.stage_tasks.get(&stage.stage_id).map(|v| v.as_slice());
                                     let loading =
                                         self.pending_task_fetches.contains(&stage.stage_id);
+                                    let sql_hint = data
+                                        .stage_sql_hints
+                                        .get(&stage.stage_id)
+                                        .map(|s| s.as_str());
                                     jobs::render_stage_detail(
                                         f,
                                         area,
                                         stage,
                                         tasks,
                                         loading,
-                                        self.stage_detail_scroll,
+                                        &mut self.stage_detail_scroll_state,
                                         data.cluster_resources.total_executor_memory,
+                                        sql_hint,
                                     );
                                 } else {
                                     self.view_mode = ViewMode::JobDetail;
@@ -517,10 +608,10 @@ impl App {
             .unwrap_or("--:--:--");
 
         let hint = match self.view_mode {
-            ViewMode::List => "q:quit Tab:switch j/k:nav Enter:detail",
-            ViewMode::JobDetail => "Esc:back j/k:nav Enter:stage s:sql q:quit",
-            ViewMode::SqlDetail => "Esc:back j/k:scroll g/G:top/bottom q:quit",
-            ViewMode::StageDetail => "Esc:back j/k:scroll g/G:top/bottom q:quit",
+            ViewMode::List => "q:quit Tab:switch j/k:nav Enter:detail h:help",
+            ViewMode::JobDetail => "Esc:back j/k:nav Enter:stage s:sql h:help",
+            ViewMode::SqlDetail => "Esc:back j/k:scroll g/G:top/bot h:hints",
+            ViewMode::StageDetail => "Esc:back j/k:scroll g/G:top/bot h:help",
         };
 
         status_line::render_status_line(

@@ -76,19 +76,30 @@ cargo clippy -- -D warnings
 | Crate                            | Purpose                                    |
 | -------------------------------- | ------------------------------------------ |
 | `clap`                           | CLI argument parsing with env var fallback |
-| `tokio`                          | Async runtime                              |
-| `reqwest`                        | HTTP client (with rustls-tls)              |
+| `tokio`                          | Async runtime (`macros`, `rt-multi-thread`, `time`, `sync` features) |
+| `reqwest`                        | HTTP client (with `rustls-tls`, no default features) |
 | `serde` / `serde_json`           | JSON deserialization                       |
 | `thiserror`                      | Error type derivation                      |
-| `ratatui`                        | Terminal UI framework                      |
+| `ratatui`                        | Terminal UI framework (`unstable-rendered-line-info` feature) |
 | `crossterm`                      | Terminal backend                           |
-| `tracing` / `tracing-subscriber` | Structured logging                         |
+| `tracing` / `tracing-subscriber` | Structured logging (with `env-filter`)     |
 | `chrono`                         | Timestamp parsing                          |
+| `syntect` / `syntect-tui`        | SQL syntax highlighting                    |
+| `tui-scrollview`                 | Smooth scrollable views for detail panels  |
+
+## CI/CD
+
+The project uses four GitHub Actions workflows:
+
+- **ci.yml** — runs `cargo fmt --check`, `cargo clippy`, and `cargo test` on every push and PR
+- **docs.yml** — builds and deploys mdbook documentation to GitHub Pages
+- **auto-tag.yml** — creates a `vX.Y.Z` git tag when `Cargo.toml` version changes on `master`
+- **release.yml** — triggered by `v*` tags; builds cross-platform release binaries (Linux x86_64, macOS x86_64 + aarch64, Windows x86_64) and creates a GitHub Release with artifacts
 
 ## Conventions
 
 - Keep analysis logic in `analyze/`, not in the TUI layer
 - Keep API types in `fetch/types.rs`, not scattered across modules
 - Format functions go in `util/format.rs`
-- Each suspect detector is a pure function: `(data) -> Vec<Suspect>`
+- Each suspect detector is a pure function: `(&[SparkStage], &SuspectContext) -> Vec<Suspect>`
 - The poller is the only place where API calls and analysis are composed together
