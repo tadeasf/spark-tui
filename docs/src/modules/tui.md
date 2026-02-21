@@ -10,9 +10,10 @@ Contains the terminal UI: app state machine, event loop, tab rendering, widgets,
 |------|---------|
 | `app.rs` | `App` struct, event loop, key handling, rendering dispatch |
 | `theme.rs` | Color and style functions |
-| `tabs/jobs.rs` | Jobs table, job detail, SQL detail views |
+| `tabs/jobs.rs` | Jobs table, job detail, SQL detail, stage detail views |
 | `tabs/suspects.rs` | Suspects table view |
 | `widgets/bar_chart.rs` | Duration bar chart for stage comparison |
+| `widgets/help.rs` | Help overlay (keybinding reference + SQL recommendations) |
 | `widgets/status_line.rs` | Status bar with cluster info and last update time |
 | `widgets/summary_bar.rs` | Health summary bar (top issues, job/IO counts) |
 
@@ -46,28 +47,51 @@ pub enum ViewMode {
 pub struct App {
     pub active_tab: Tab,
     pub view_mode: ViewMode,
-    pub data: Option<DataPayload>,
+    pub data: Option<Arc<DataPayload>>,
     pub error_msg: Option<String>,
     pub cluster_id: String,
     pub should_quit: bool,
     pub job_table_state: TableState,
     pub suspect_table_state: TableState,
     pub detail_table_state: TableState,
-    pub sql_scroll: u16,
-    pub stage_detail_scroll: u16,
+    pub sql_scroll_state: ScrollViewState,
+    pub stage_detail_scroll_state: ScrollViewState,
+    show_help: bool,
+    return_tab: Option<Tab>,
+    client: Arc<SparkHttpClient>,
+    tx: mpsc::UnboundedSender<Action>,
+    pending_task_fetches: HashSet<i64>,
 }
 ```
+
+**Notable changes from v1:**
+- `data` changed from `Option<DataPayload>` to `Option<Arc<DataPayload>>` for cheaper cloning
+- `sql_scroll: u16` and `stage_detail_scroll: u16` replaced with `sql_scroll_state: ScrollViewState` and `stage_detail_scroll_state: ScrollViewState` (from `tui-scrollview`)
+- `show_help: bool` — toggles the help overlay
+- `return_tab: Option<Tab>` — tracks which tab to return to on Esc from JobDetail (e.g., Suspects tab when entering via a suspect)
 
 **Key methods:**
 
 | Method | Description |
 |--------|-------------|
-| `new(cluster_id)` | Creates a new App with initial state |
+| `new(cluster_id, client, tx)` | Creates a new App with initial state |
 | `run(&mut self, terminal, rx)` | Main event loop — receives Actions from the channel, handles keys, re-renders |
 | `handle_key(key_event)` | Processes keyboard input based on current ViewMode |
-| `handle_enter()` | Drills into the selected item |
 | `handle_action(action)` | Processes DataUpdate, FetchError, Key, Mouse, Resize actions |
+| `handle_escape()` | Goes back one level; respects `return_tab` |
+| `handle_enter()` | Drills into the selected item |
+| `handle_navigation_down()` | Moves selection/scroll down based on ViewMode |
+| `handle_navigation_up()` | Moves selection/scroll up based on ViewMode |
+| `handle_navigation_home()` | Jumps to top |
+| `handle_navigation_end()` | Jumps to bottom |
+| `open_sql_detail()` | Opens SQL detail for the current job |
+| `enter_suspect_job()` | Navigates from Suspects tab to a suspect's job detail, setting `return_tab` |
+| `enter_stage_detail()` | Navigates to stage detail from job detail |
+| `trigger_task_fetch(stage_id)` | Triggers on-demand task fetch for a stage not already in `stage_tasks` |
 | `render(frame)` | Renders the current state to the terminal |
+| `render_tab_bar(frame, area)` | Renders the tab header |
+| `render_content(frame, area)` | Renders the main content area for the current ViewMode |
+| `render_status_bar(frame, area)` | Renders the bottom status bar with context-sensitive hint strings |
 
 ## `theme.rs` — Styles
 
@@ -99,22 +123,36 @@ Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 
 | Function | Description |
 |----------|-------------|
+| `format_submission_time(time)` | Formats submission time for display |
 | `render_jobs_tab(frame, area, app)` | Renders the jobs table with columns: ID, Status, Duration, Tasks, Failed, SQL, Submitted |
-| `render_job_detail(frame, area, app)` | Splits area into stage table (top) and duration bar chart (bottom) |
-| `render_sql_detail(frame, area, app)` | Renders scrollable SQL execution plan text |
-| `render_stage_detail(frame, area, stage, tasks, loading, scroll, cluster_mem)` | Renders stage detail with I/O, color-coded CPU %, peak RAM, task histograms, per-executor breakdown, skew metrics |
+| `render_job_detail(frame, area, job, stages, sql_executions, stage_state, critical_stages)` | Splits area into stage table (top) and duration bar chart (bottom). Critical path stages are annotated with "CP" |
+| `render_sql_detail(frame, area, job, scroll_state, suspects)` | Renders scrollable SQL execution plan text with syntax highlighting. Uses `ScrollViewState` from `tui-scrollview` |
+| `render_stage_header(frame, area, stage, total_cluster_memory, sql_hint)` | Renders stage header with I/O metrics, CPU %, and optional SQL plan hint |
+| `render_duration_histogram(frame, area, tasks)` | Renders task duration histogram |
+| `render_executor_breakdown(frame, area, tasks)` | Renders per-executor breakdown table |
+| `render_peak_memory_section(frame, area, tasks, total_cluster_memory)` | Renders peak memory per task section |
+| `render_skew_metrics(frame, area, tasks)` | Renders skew metrics (CV, max/median ratio) |
+| `render_stage_detail(frame, area, stage, tasks, loading, scroll_state, total_cluster_memory, sql_hint)` | Renders full stage detail using `ScrollViewState`. Composes stage_header, I/O metrics, duration histogram, executor breakdown, peak memory, and skew metrics |
 
 ## `tabs/suspects.rs` — Suspects Tab
 
 | Function | Description |
 |----------|-------------|
-| `render_suspects_tab(frame, area, app)` | Renders suspects table with columns: Severity, Category, Stage, Job, Title, Detail, Recommendation |
+| `render_suspects_tab(frame, area, suspects, state, critical_stages)` | Renders suspects table with columns: Severity, Category, Stage, Job, Title, Detail, Recommendation. Table title: `"Suspects (severity → savings)"` |
 
 ## `widgets/bar_chart.rs`
 
 | Function | Description |
 |----------|-------------|
 | `render_duration_chart(frame, area, stages)` | Renders a horizontal bar chart comparing stage durations |
+
+## `widgets/help.rs`
+
+| Function | Description |
+|----------|-------------|
+| `centered_rect(area, percent_x, percent_y)` | Computes a centered rectangle within an area (private helper) |
+| `render_help_overlay(frame, area)` | Renders a general keybinding reference overlay |
+| `render_sql_help_overlay(frame, area, job, suspects)` | Renders PySpark-specific recommendations for suspects related to the current SQL execution |
 
 ## `widgets/status_line.rs`
 

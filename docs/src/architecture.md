@@ -16,16 +16,17 @@ src/
 ├── analyze/
 │   ├── types.rs         Suspect, Severity, SuspectCategory, BottleneckPattern
 │   ├── skew.rs          Data skew detection (CV + max/median)
-│   ├── suspects.rs      Slow stage + spill detection, bottleneck classification
+│   ├── suspects.rs      SuspectContext, 10 detectors, bottleneck classification
 │   └── sql_linker.rs    Job ↔ SQL ↔ Stage mapping
 ├── tui/
 │   ├── app.rs           App state, event loop, key handling, rendering
 │   ├── theme.rs         Color/style functions
 │   ├── tabs/
-│   │   ├── jobs.rs      Jobs table + job detail + SQL detail views
+│   │   ├── jobs.rs      Jobs table + job detail + SQL detail + stage detail views
 │   │   └── suspects.rs  Suspects table view
 │   └── widgets/
 │       ├── bar_chart.rs Duration bar chart for stage comparison
+│       ├── help.rs      Help overlay (keybinding reference + SQL recommendations)
 │       ├── status_line.rs Status bar (cluster ID, app ID, last update time)
 │       └── summary_bar.rs Health summary bar (job/IO counts, top issues)
 └── util/
@@ -42,6 +43,8 @@ src/
 └──────────┘     └──────────────┘     └──────┬───────┘     └─────┬─────┘
                                              │                   │
                                     DataPayload              Suspects
+                                    + stage_sql_hints        (via SuspectContext)
+                                    + critical_stages
                                              │                   │
                                              ▼                   ▼
                                      ┌───────────────────────────────┐
@@ -62,12 +65,14 @@ src/
    - Fetches jobs, stages, SQL executions, and executors concurrently via 4-way `tokio::join!`
    - Aggregates active executors into `ClusterResources` (total memory, cores, executor count)
    - Builds cross-reference maps (job↔SQL, stage↔job)
-   - Runs analysis (slow stages, spill, CPU efficiency, record explosion, task failures, memory pressure, skew detection)
+   - Creates a `SuspectContext` with cross-reference maps
+   - Runs 10 stage-level detectors via function pointer table, plus skew detection on task data
    - Fetches task lists for up to ~15 stages (selected by multiple heuristics)
+   - Computes `stage_sql_hints` (SQL plan hints per stage) and `critical_stages` (longest wall-clock stage per job)
    - Computes `HealthSummary` for the summary bar
-   - Sends a `DataPayload` (including `cluster_resources`) through an mpsc channel
+   - Sends a `DataPayload` (including `cluster_resources`, `stage_sql_hints`, `critical_stages`) through an mpsc channel
 
-5. **Analysis** (`analyze/`) — `detect_slow_stages`, `detect_spill`, `detect_cpu_efficiency`, `detect_record_explosion`, `detect_task_failures`, `detect_memory_pressure`, and `detect_skew` each produce `Vec<Suspect>`. `aggregate_suspects` sorts by severity
+5. **Analysis** (`analyze/`) — 10 stage-level detectors are dispatched via a function pointer table (`&[DetectorFn]`): `detect_slow_stages`, `detect_spill`, `detect_cpu_efficiency`, `detect_record_explosion`, `detect_task_failures`, `detect_memory_pressure`, `detect_partition_count`, `detect_broadcast_join`, `detect_python_udf`, `detect_cache_opportunity`. Each takes `(&[SparkStage], &SuspectContext)` and returns `Vec<Suspect>`. `detect_skew` runs separately on task data. `aggregate_suspects` sorts by severity then `estimated_savings_ms`
 
 6. **App event loop** (`tui/app.rs`) — `App::run` receives `Action` variants from the mpsc channel:
    - `Action::DataUpdate(payload)` — stores the new data
@@ -93,6 +98,34 @@ All tasks communicate through a single `mpsc::UnboundedSender<Action>` channel. 
 
 - **Bounded task fetching**: Task lists (per-task metrics) are fetched for up to ~15 stages selected by multiple heuristics (top-by-runtime, top-by-shuffle, high-parallelism). On-demand task fetching is triggered when entering StageDetail for stages not already analyzed
 - **Concurrent fetches**: Jobs, stages, SQL executions, and executors are fetched in parallel with 4-way `tokio::join!` to minimize latency
+- **Function pointer dispatch**: Stage-level detectors are stored in a `&[DetectorFn]` array and dispatched via `flat_map`, making it easy to add new detectors
+- **SuspectContext**: Replaces ad-hoc parameter passing — all cross-reference maps are bundled in a single struct with helper methods (`job_id`, `resolve_sql`, `resolve_plan_hint_for`, `enrich`)
+- **tui-scrollview**: Used for smooth scrolling in StageDetail and SqlDetail views, replacing manual `u16` scroll offsets with `ScrollViewState`
 - **Log file**: Logs go to `/tmp/spark-tui.log` instead of stderr to avoid corrupting the TUI
 - **Panic hook**: A custom panic hook restores the terminal before printing the panic message, preventing terminal corruption
 - **Edition 2024**: Uses the latest Rust edition for modern language features
+
+## Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `clap` | CLI argument parsing with env var fallback |
+| `tokio` | Async runtime (`macros`, `rt-multi-thread`, `time`, `sync` features) |
+| `reqwest` | HTTP client (with `rustls-tls`) |
+| `serde` / `serde_json` | JSON deserialization |
+| `thiserror` | Error type derivation |
+| `ratatui` | Terminal UI framework (with `unstable-rendered-line-info` feature) |
+| `crossterm` | Terminal backend |
+| `tracing` / `tracing-subscriber` | Structured logging |
+| `chrono` | Timestamp parsing |
+| `syntect` / `syntect-tui` | SQL syntax highlighting |
+| `tui-scrollview` | Smooth scrollable views for detail panels |
+
+## CI/CD Workflows
+
+| Workflow | Trigger | Description |
+|----------|---------|-------------|
+| `ci.yml` | Push / PR | Runs `cargo fmt --check`, `cargo clippy`, `cargo test` |
+| `docs.yml` | Push / PR | Builds and deploys mdbook documentation to GitHub Pages |
+| `auto-tag.yml` | Push to `master` (Cargo.toml changed) | Creates a `vX.Y.Z` tag when the version in `Cargo.toml` changes |
+| `release.yml` | Tag `v*` | Cross-platform release builds (Linux x86_64, macOS x86_64 + aarch64, Windows x86_64) with GitHub Release artifacts |

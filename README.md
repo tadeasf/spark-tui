@@ -11,12 +11,17 @@ A terminal UI for Apache Spark performance analysis via the Databricks driver pr
 ## Features
 
 - **Live job dashboard** — ranked by duration, auto-refreshing via background poller
-- **Suspect detection** — flags slow stages, data skew, and disk spill automatically
+- **16 suspect detectors** — flags slow stages, data skew, disk spill, partition count issues, broadcast join opportunities, Python UDF usage, cache opportunities, and more
 - **Bottleneck classification** — identifies Large Scan, Wide Shuffle, and Data Explosion patterns
 - **SQL correlation** — links jobs and stages back to SQL executions with plan hints
+- **Critical path analysis** — annotates the longest-running stage per job with a "CP" marker
+- **Estimated savings** — each suspect includes an estimated time savings to help prioritize fixes
 - **Drill-down navigation** — job list → job detail (stages + bar chart) → SQL plan view
+- **Help overlay** — press `h` for context-sensitive keybinding reference and PySpark recommendations
+- **Smooth scrolling** — `tui-scrollview` integration for fluid scrolling in detail views
 - **Color-coded severity** — warning (yellow) and critical (red) indicators at a glance
-- **Actionable recommendations** — each suspect includes a concrete tuning suggestion
+- **PySpark recommendations** — each suspect includes concrete PySpark tuning suggestions
+- **Cross-platform releases** — CI/CD builds for Linux, macOS (x86 + ARM), and Windows
 - **Zero setup** — reads credentials from CLI flags, env vars, or `~/.databrickscfg`
 
 ## Quick Start
@@ -72,17 +77,18 @@ spark-tui --profile my-workspace
 
 ## Keybindings
 
-| Key                 | Action                                |
-| ------------------- | ------------------------------------- |
-| `Tab` / `Shift+Tab` | Switch between Jobs and Suspects tabs |
-| `j` / `↓`           | Move selection down                   |
-| `k` / `↑`           | Move selection up                     |
-| `g` / `Home`        | Jump to top                           |
-| `G` / `End`         | Jump to bottom                        |
-| `Enter`             | Drill into job detail / stage detail  |
-| `s`                 | Open SQL plan view (from job detail)  |
-| `Esc`               | Go back one level                     |
-| `q`                 | Quit                                  |
+| Key                 | Action                                                       |
+| ------------------- | ------------------------------------------------------------ |
+| `Tab` / `Shift+Tab` | Switch between Jobs and Suspects tabs                        |
+| `j` / `↓`           | Move selection down                                          |
+| `k` / `↑`           | Move selection up                                            |
+| `g` / `Home`        | Jump to top                                                  |
+| `G` / `End`         | Jump to bottom                                               |
+| `Enter`             | Drill into job detail / stage detail                         |
+| `s`                 | Open SQL plan view (from job detail)                         |
+| `h`                 | Toggle help overlay (keybinding reference / SQL recommendations) |
+| `Esc`               | Go back one level                                            |
+| `q`                 | Quit                                                         |
 
 ## Screenshots
 <img width="1080" height="1110" alt="image" src="https://github.com/user-attachments/assets/25845362-4af0-4003-85cb-ccb9157abfea" />

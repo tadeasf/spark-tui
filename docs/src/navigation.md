@@ -24,6 +24,7 @@ List ──Enter──▶ JobDetail ──Enter──▶ StageDetail
 |-----|--------|
 | `q` | Quit the application |
 | `Esc` | Go back one level (SqlDetail → JobDetail → List → Quit) |
+| `h` | Toggle help overlay (keybinding reference in most views; PySpark recommendations in SqlDetail) |
 
 ### List Mode (Jobs / Suspects tabs)
 
@@ -37,6 +38,8 @@ List ──Enter──▶ JobDetail ──Enter──▶ StageDetail
 | `G` / `End` | Jump to last row |
 | `Enter` | Drill into the selected job's detail view |
 
+Status bar hint: `q:quit Tab:switch j/k:nav Enter:detail h:help`
+
 ### JobDetail Mode
 
 | Key | Action |
@@ -49,6 +52,10 @@ List ──Enter──▶ JobDetail ──Enter──▶ StageDetail
 | `s` | Open SQL plan view (if the job has a linked SQL execution) |
 | `Esc` | Return to List mode |
 
+Status bar hint: `Esc:back j/k:nav Enter:stage s:sql h:help`
+
+**Note:** When entering JobDetail from the Suspects tab, pressing `Esc` returns to the Suspects tab (not Jobs). This is tracked via the `return_tab` field.
+
 ### StageDetail Mode
 
 | Key | Action |
@@ -59,6 +66,8 @@ List ──Enter──▶ JobDetail ──Enter──▶ StageDetail
 | `G` / `End` | Scroll to bottom |
 | `Esc` | Return to JobDetail mode |
 
+Status bar hint: `Esc:back j/k:scroll g/G:top/bot h:help`
+
 ### SqlDetail Mode
 
 | Key | Action |
@@ -67,7 +76,19 @@ List ──Enter──▶ JobDetail ──Enter──▶ StageDetail
 | `k` / `↑` | Scroll up |
 | `g` / `Home` | Scroll to top |
 | `G` / `End` | Scroll to bottom |
+| `h` | Show PySpark recommendations for suspects related to this SQL execution |
 | `Esc` | Return to JobDetail mode |
+
+Status bar hint: `Esc:back j/k:scroll g/G:top/bot h:hints`
+
+## Help Overlay
+
+Pressing `h` toggles a help overlay:
+
+- **In List, JobDetail, and StageDetail modes:** Shows a general keybinding reference card listing all available shortcuts for the current view.
+- **In SqlDetail mode:** Shows PySpark-specific recommendations based on suspect findings related to the current SQL execution.
+
+Press `h` again or `Esc` to dismiss the overlay.
 
 ## Tabs
 
@@ -84,10 +105,10 @@ Displays all Spark jobs in a table, ranked by duration (slowest first). Running 
 
 ### Suspects Tab
 
-Displays automatically detected performance issues, sorted by severity (Critical first, then Warning). Each row shows:
+Displays automatically detected performance issues, sorted by severity (Critical first), then by estimated savings descending as a tiebreaker. Each row shows:
 
 - Severity indicator (color-coded)
-- Category (Slow Stage / Data Skew / Data Size Skew / Record Count Skew / Disk Spill / CPU Bottleneck / I/O Bottleneck / Record Explosion / Task Failures / Memory Pressure / Executor Hotspot)
+- Category (Slow Stage / Data Skew / Data Size Skew / Record Count Skew / Disk Spill / CPU Bottleneck / I/O Bottleneck / Record Explosion / Task Failures / Memory Pressure / Executor Hotspot / Too Many Partitions / Too Few Partitions / Broadcast Join Opportunity / Python UDF / Cache Opportunity)
 - Stage ID and job ID
 - Title with key metrics
 - Detail summary
@@ -102,6 +123,7 @@ Displays automatically detected performance issues, sorted by severity (Critical
 | Green | Healthy / succeeded status |
 | Gray | Muted / secondary information |
 | Cyan | Selected row highlight |
+| Magenta | **CP** — Critical Path stage (longest-running stage per job) |
 
 ### CPU Utilization (Stage Detail)
 
