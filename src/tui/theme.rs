@@ -1,7 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::analyze::types::Severity;
-use crate::fetch::types::JobStatus;
 
 pub fn critical() -> Style {
     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
@@ -40,10 +39,6 @@ pub fn tab_active() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-pub fn tab_inactive() -> Style {
-    Style::default().fg(Color::Gray)
-}
-
 pub fn status_bar() -> Style {
     Style::default().fg(Color::White).bg(Color::DarkGray)
 }
@@ -52,15 +47,6 @@ pub fn severity_style(severity: Severity) -> Style {
     match severity {
         Severity::Critical => critical(),
         Severity::Warning => warning(),
-    }
-}
-
-pub fn job_status_style(status: JobStatus) -> Style {
-    match status {
-        JobStatus::Running => running(),
-        JobStatus::Succeeded => healthy(),
-        JobStatus::Failed => failed(),
-        JobStatus::Unknown => muted(),
     }
 }
 
@@ -84,9 +70,7 @@ pub fn metric_bytes_style(bytes: i64) -> Style {
 
 /// Color style for shuffle byte values (lower thresholds).
 pub fn shuffle_bytes_style(bytes: i64) -> Style {
-    if bytes <= 0 {
-        Style::default()
-    } else if bytes < 100 * MB {
+    if bytes < 100 * MB {
         Style::default()
     } else if bytes < 500 * MB {
         warning()

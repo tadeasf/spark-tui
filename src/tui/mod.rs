@@ -7,7 +7,7 @@ pub mod widgets;
 use crate::analyze::types::{RankedJob, Suspect};
 use crate::fetch::client::FetchError;
 use crate::fetch::types::{SparkSqlExecution, SparkStage};
-use crossterm::event::{KeyEvent, MouseEvent};
+use crossterm::event::KeyEvent;
 
 /// All data needed to render the TUI.
 #[derive(Debug, Clone)]
@@ -21,11 +21,11 @@ pub struct DataPayload {
 }
 
 /// Actions sent through the channel to the app event loop.
+#[allow(dead_code)]
 pub enum Action {
     Key(KeyEvent),
-    Mouse(MouseEvent),
+    Mouse(crossterm::event::MouseEvent),
     Resize(u16, u16),
     DataUpdate(DataPayload),
     FetchError(FetchError),
-    Tick,
 }

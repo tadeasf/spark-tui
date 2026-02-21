@@ -16,14 +16,6 @@ pub struct RankedJob {
     pub sql_plan: Option<String>,
 }
 
-/// Link between a SQL execution and its associated jobs.
-#[derive(Debug, Clone)]
-pub struct SqlJobLink {
-    pub sql_id: i64,
-    pub sql_description: String,
-    pub job_ids: Vec<i64>,
-}
-
 /// Severity level for suspects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {

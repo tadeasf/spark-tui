@@ -43,7 +43,7 @@ async fn main() {
     // Set panic hook to restore terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        let _ = ratatui::restore();
+        ratatui::restore();
         original_hook(panic_info);
     }));
 
@@ -65,7 +65,7 @@ async fn main() {
     let event_tx = tx.clone();
     tokio::spawn(async move {
         loop {
-            match tokio::task::spawn_blocking(|| event::read()).await {
+            match tokio::task::spawn_blocking(event::read).await {
                 Ok(Ok(evt)) => {
                     let action = match evt {
                         Event::Key(key) => Action::Key(key),

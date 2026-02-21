@@ -69,6 +69,7 @@ pub fn clean_stage_name(name: &str) -> &str {
         // The UUID is 36 chars (with hyphens). Skip past it.
         // Format: "uuid" or "uuid - description"
         // Look for closing quote of UUID then a separator
+        #[allow(clippy::collapsible_if)]
         if let Some(after_uuid) = rest.find("\" - ").map(|i| &rest[i + 4..]) {
             if !after_uuid.is_empty() {
                 return after_uuid.trim();

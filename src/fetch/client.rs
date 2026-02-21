@@ -56,10 +56,6 @@ impl SparkHttpClient {
         }
     }
 
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, FetchError> {
         let url = format!("{}{}", self.base_url, path);
 

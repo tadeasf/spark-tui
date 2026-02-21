@@ -3,6 +3,7 @@ use serde::de::Deserializer;
 
 // -- Application --
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SparkApplication {
@@ -21,6 +22,7 @@ pub enum JobStatus {
     Unknown,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SparkJob {
@@ -55,6 +57,7 @@ pub enum StageStatus {
     Skipped,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SparkStage {
@@ -86,6 +89,7 @@ pub struct SparkStage {
 
 // -- SQL Executions --
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SparkSqlExecution {
@@ -108,6 +112,7 @@ pub struct SparkSqlExecution {
 
 /// Public task type with flat metric fields.
 /// Deserialized from Spark's nested `taskMetrics` JSON via `RawSparkTask`.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SparkTask {
     pub task_id: i64,

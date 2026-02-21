@@ -90,6 +90,7 @@ impl App {
                 self.error_msg = None;
 
                 // Preserve selection across refresh
+                #[allow(clippy::collapsible_if)]
                 if self.view_mode == ViewMode::JobDetail || self.view_mode == ViewMode::SqlDetail {
                     if let Some(old_data) = &self.data {
                         if let Some(sel_idx) = self.job_table_state.selected() {
@@ -116,7 +117,6 @@ impl App {
             }
             Action::Resize(_, _) => {}
             Action::Mouse(_) => {}
-            Action::Tick => {}
         }
     }
 
@@ -147,6 +147,7 @@ impl App {
             }
             KeyCode::Char('s') if self.view_mode == ViewMode::JobDetail => {
                 // Open SQL detail if the selected job has sql_id
+                #[allow(clippy::collapsible_if)]
                 if let Some(data) = &self.data {
                     if let Some(idx) = self.job_table_state.selected() {
                         if let Some(job) = data.jobs.get(idx) {
@@ -206,6 +207,7 @@ impl App {
                     }
                 }
                 Tab::Suspects => {
+                    #[allow(clippy::collapsible_if)]
                     if let Some(idx) = self.suspect_table_state.selected() {
                         if let Some(data) = &self.data {
                             if let Some(suspect) = data.suspects.get(idx) {

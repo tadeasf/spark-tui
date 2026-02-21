@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use crate::fetch::types::{SparkJob, SparkSqlExecution, SparkStage, StageStatus};
 
-use super::types::SqlJobLink;
-
 /// Build a mapping from job_id -> sql_id.
 pub fn build_job_to_sql_map(sql_executions: &[SparkSqlExecution]) -> HashMap<i64, i64> {
     let mut map = HashMap::new();
@@ -30,26 +28,6 @@ pub fn build_stage_to_job_map(jobs: &[SparkJob]) -> HashMap<i64, i64> {
         }
     }
     map
-}
-
-/// Build SqlJobLink list from SQL executions.
-pub fn link_sql_to_jobs(sql_executions: &[SparkSqlExecution]) -> Vec<SqlJobLink> {
-    sql_executions
-        .iter()
-        .map(|sql| {
-            let mut job_ids: Vec<i64> = Vec::new();
-            job_ids.extend(&sql.running_job_ids);
-            job_ids.extend(&sql.success_job_ids);
-            job_ids.extend(&sql.failed_job_ids);
-            job_ids.sort();
-            job_ids.dedup();
-            SqlJobLink {
-                sql_id: sql.id,
-                sql_description: sql.description.clone(),
-                job_ids,
-            }
-        })
-        .collect()
 }
 
 /// Find the SQL description for a given job_id.
@@ -136,12 +114,4 @@ mod tests {
         assert_eq!(map.get(&99), None);
     }
 
-    #[test]
-    fn test_link_sql_to_jobs() {
-        let sqls = vec![make_sql(1, vec![10, 11])];
-        let links = link_sql_to_jobs(&sqls);
-        assert_eq!(links.len(), 1);
-        assert_eq!(links[0].sql_id, 1);
-        assert_eq!(links[0].job_ids, vec![10, 11]);
-    }
 }

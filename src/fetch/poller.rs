@@ -156,6 +156,7 @@ async fn poll_once(
                     sql_desc.map(|s| s.as_str()),
                 ) {
                     // Enrich with sql_plan_hint
+                    #[allow(clippy::collapsible_if)]
                     if let Some(sid) = sql_id {
                         if let Some(plan) = sql_plans.get(&sid) {
                             let ops = crate::util::format::parse_plan_top_operations(plan, 3);

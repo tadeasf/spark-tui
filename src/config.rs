@@ -176,6 +176,7 @@ fn parse_databrickscfg(path: &PathBuf) -> Result<HashMap<String, Profile>, Strin
         }
 
         // Key = value
+        #[allow(clippy::collapsible_if)]
         if let Some(ref section) = current_section {
             if let Some((key, value)) = line.split_once('=') {
                 let key = key.trim().to_string();
@@ -191,6 +192,7 @@ fn parse_databrickscfg(path: &PathBuf) -> Result<HashMap<String, Profile>, Strin
 /// Find the first profile that has host, token, and cluster_id set.
 fn find_complete_profile(profiles: &HashMap<String, Profile>) -> Option<&Profile> {
     // Try DEFAULT first
+    #[allow(clippy::collapsible_if)]
     if let Some(p) = profiles.get("DEFAULT") {
         if p.contains_key("host") && p.contains_key("token") && p.contains_key("cluster_id") {
             return Some(p);
