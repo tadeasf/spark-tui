@@ -9,9 +9,9 @@ Contains all performance analysis logic: suspect detection, bottleneck classific
 | File | Purpose |
 |------|---------|
 | `types.rs` | Core types: `Suspect`, `Severity`, `SuspectCategory`, `BottleneckPattern`, `RankedJob`, `SqlJobLink` |
-| `skew.rs` | Data skew detection using task-level metrics |
-| `suspects.rs` | `SuspectContext`, 10 stage-level detectors, bottleneck classification, aggregation |
-| `sql_linker.rs` | Cross-reference maps between jobs, stages, and SQL executions |
+| `skew/` | Data skew detection using task-level metrics |
+| `suspects/` | `SuspectContext`, 10 stage-level detectors, bottleneck classification, aggregation |
+| `sql_linker/` | Cross-reference maps between jobs, stages, and SQL executions |
 
 ## `types.rs` — Core Types
 
@@ -121,7 +121,7 @@ pub struct HealthSummary {
 
 Aggregates health metrics for the summary bar widget, computed by `compute_health_summary` in the poller.
 
-## `skew.rs` — Skew Detection
+## `skew/` — Skew Detection
 
 ### `detect_skew`
 
@@ -138,7 +138,7 @@ pub fn detect_skew(
 
 Detects all forms of skew in a stage's tasks. Returns a `Vec<Suspect>` covering duration skew, data-size skew, record-count skew, and executor hotspot detection. See [Understanding Analysis](../analysis-guide.md) for threshold details.
 
-## `suspects.rs` — Stage-Level Detection
+## `suspects/` — Stage-Level Detection
 
 ### Constants
 
@@ -286,7 +286,7 @@ Sorts suspects by severity (Critical first), then by `estimated_savings_ms` desc
 
 Note: `resolve_sql` and `resolve_plan_hint_for` are now methods on `SuspectContext` (see above).
 
-## `sql_linker.rs` — Cross-Reference Maps
+## `sql_linker/` — Cross-Reference Maps
 
 | Function | Signature | Description |
 |----------|-----------|-------------|

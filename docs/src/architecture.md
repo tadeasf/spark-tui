@@ -6,34 +6,42 @@ spark-tui follows a modular architecture with clear separation between configura
 
 ```
 src/
-├── main.rs              Entry point: config → client → poller → app loop
-├── config.rs            CLI args, env vars, ~/.databrickscfg parsing
+├── main.rs
+├── config/
+│   └── mod.rs             CLI args, env vars, ~/.databrickscfg parsing
 ├── fetch/
-│   ├── client.rs        SparkHttpClient + FetchError
-│   ├── spark.rs         Endpoint methods (get_jobs, get_stages, etc.)
-│   ├── types.rs         Spark API response types (serde)
-│   ├── databricks.rs    DatabricksClient (cluster info, DBFS, sparkui, history server)
-│   ├── poller.rs        Background polling loop + historical fallback chain
-│   └── eventlog/        Event log parsing (DBFS download, gzip, SparkEvent serde)
+│   ├── client.rs          SparkHttpClient + FetchError
+│   ├── spark.rs           Endpoint methods (get_jobs, get_stages, etc.)
+│   ├── types.rs           Spark API response types (serde)
+│   ├── databricks.rs      DatabricksClient (cluster info, DBFS, sparkui, history server)
+│   ├── orchestrator.rs    poll_once, assemble_data_payload, compute_health_summary
+│   ├── poller.rs          run_poller + historical fallback chain
+│   └── eventlog/          Event log parsing (DBFS download, gzip, SparkEvent serde)
 ├── analyze/
-│   ├── types.rs         Suspect, Severity, SuspectCategory, BottleneckPattern
-│   ├── skew.rs          Data skew detection (CV + max/median)
-│   ├── suspects.rs      SuspectContext, 10 detectors, bottleneck classification
-│   └── sql_linker.rs    Job ↔ SQL ↔ Stage mapping
+│   ├── types.rs           Suspect, Severity, SuspectCategory, BottleneckPattern
+│   ├── skew/              Data skew detection (CV + max/median)
+│   ├── suspects/          SuspectContext, 10 detectors, bottleneck classification
+│   └── sql_linker/        Job ↔ SQL ↔ Stage mapping
 ├── tui/
-│   ├── app.rs           App state, event loop, key handling, rendering
-│   ├── theme.rs         Color/style functions
+│   ├── app/               App state, event loop, key handling, rendering dispatch
+│   │   ├── state.rs
+│   │   ├── input.rs
+│   │   └── render.rs
+│   ├── theme.rs           Color/style functions
+│   ├── highlight.rs       SQL/plan syntax highlighting
 │   ├── tabs/
-│   │   ├── jobs.rs      Jobs table + job detail + SQL detail + stage detail views
-│   │   └── suspects.rs  Suspects table view
+│   │   ├── jobs_list.rs   Jobs table
+│   │   ├── job_detail.rs  Stage breakdown for a job
+│   │   ├── sql_detail.rs  SQL execution plan view
+│   │   ├── stage_detail.rs Detailed stage metrics
+│   │   └── suspects.rs    Suspects table view
 │   └── widgets/
-│       ├── bar_chart.rs Duration bar chart for stage comparison
-│       ├── help.rs      Help overlay (keybinding reference + SQL recommendations)
-│       ├── status_line.rs Status bar (cluster ID, app ID, last update time)
-│       └── summary_bar.rs Health summary bar (job/IO counts, top issues)
+│       ├── help.rs        Help overlay
+│       ├── status_line.rs Status bar
+│       └── summary_bar.rs Health summary bar
 └── util/
-    ├── format.rs        format_duration_ms, format_bytes, truncate, clean_stage_name
-    └── time.rs          Spark timestamp parsing, duration_between
+    ├── format/            format_duration_ms, format_bytes, truncate, clean_stage_name
+    └── time/              Spark timestamp parsing, duration_between
 ```
 
 ## Data Flow
@@ -57,13 +65,13 @@ src/
 
 ### Step by step:
 
-1. **Config resolution** (`config.rs`) — parses CLI args, env vars, and `~/.databrickscfg` to produce a `Config` struct with host, token, cluster_id, and poll_interval
+1. **Config resolution** (`config/mod.rs`) — parses CLI args, env vars, and `~/.databrickscfg` to produce a `Config` struct with host, token, cluster_id, and poll_interval
 
 2. **HTTP client** (`fetch/client.rs`) — `SparkHttpClient` wraps `reqwest::Client` with the base URL and token. `FetchError` maps HTTP status codes to user-friendly messages
 
 3. **Endpoint methods** (`fetch/spark.rs`) — `discover_app_id`, `get_jobs`, `get_stages`, `get_sql_executions`, `get_task_list`, `get_executors` — each calls the Spark REST API and deserializes the response
 
-4. **Background poller** (`fetch/poller.rs`) — `run_poller` runs in a tokio task, calling `poll_once` on each interval. When the cluster becomes unreachable (503 or terminated), the poller automatically falls back to historical data via a 4-strategy chain: Spark UI REST API (with warm-up retry), Spark History Server proxy, DBFS event logs, and default DBFS path scanning. `poll_once`:
+4. **Background poller** (`fetch/poller.rs`) — `run_poller` runs in a tokio task. When the cluster becomes unreachable (503 or terminated), the poller automatically falls back to historical data via a 4-strategy chain: Spark UI REST API (with warm-up retry), Spark History Server proxy, DBFS event logs, and default DBFS path scanning. **`poll_once`** lives in `fetch/orchestrator.rs` (separate from the poller loop):
    - Fetches jobs, stages, SQL executions, and executors concurrently via 4-way `tokio::join!`
    - Aggregates active executors into `ClusterResources` (total memory, cores, executor count)
    - Builds cross-reference maps (job↔SQL, stage↔job)
@@ -76,7 +84,7 @@ src/
 
 5. **Analysis** (`analyze/`) — 10 stage-level detectors are dispatched via a function pointer table (`&[DetectorFn]`): `detect_slow_stages`, `detect_spill`, `detect_cpu_efficiency`, `detect_record_explosion`, `detect_task_failures`, `detect_memory_pressure`, `detect_partition_count`, `detect_broadcast_join`, `detect_python_udf`, `detect_cache_opportunity`. Each takes `(&[SparkStage], &SuspectContext)` and returns `Vec<Suspect>`. `detect_skew` runs separately on task data. `aggregate_suspects` sorts by severity then `estimated_savings_ms`
 
-6. **App event loop** (`tui/app.rs`) — `App::run` receives `Action` variants from the mpsc channel:
+6. **App event loop** (`tui/app/`) — `App::run` receives `Action` variants from the mpsc channel:
    - `Action::DataUpdate(payload)` — stores the new data
    - `Action::FetchError(err)` — stores the error message
    - `Action::Key(event)` — processes keybindings

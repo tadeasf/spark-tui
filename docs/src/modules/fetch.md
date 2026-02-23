@@ -12,7 +12,8 @@ Handles HTTP communication with the Spark REST API via the Databricks driver pro
 | `types.rs` | Spark API response types (serde) |
 | `spark.rs` | Endpoint methods on `SparkHttpClient` |
 | `databricks.rs` | `DatabricksClient` for Databricks REST API, DBFS, Spark UI, and History Server |
-| `poller.rs` | Background polling loop, historical fallback chain, and data aggregation |
+| `orchestrator.rs` | `poll_once`, `assemble_data_payload`, `compute_health_summary` |
+| `poller.rs` | Background polling loop and historical fallback chain |
 | `eventlog/` | Event log parsing: DBFS download, gzip decompression, `SparkEvent` serde |
 
 ## `client.rs` — SparkHttpClient
@@ -151,36 +152,7 @@ The `is_loading_page()` helper detects HTML loading pages returned during Spark 
 
 The `load_event_log()` function orchestrates: discover log path → download from DBFS → decompress gzip → parse JSON lines → return structured data.
 
-## `poller.rs` — Background Poller
-
-### `run_poller`
-
-```rust
-pub async fn run_poller(
-    client: Arc<SparkHttpClient>,
-    databricks: Arc<DatabricksClient>,
-    config: Arc<Config>,
-    tx: mpsc::UnboundedSender<Action>,
-    poll_interval: Duration,
-)
-```
-
-1. Discovers the application ID (or detects cluster unreachable → historical fallback)
-2. Enters a live poll loop: `poll_once` → send result via channel → sleep
-3. On connection loss during polling, falls back to historical data
-
-### Historical Fallback Chain
-
-When the cluster is unreachable, `try_load_historical` attempts these strategies in order:
-
-| Strategy | Function | Condition |
-|----------|----------|-----------|
-| 0 — Spark UI | `try_sparkui` | Requires `spark_context_id`; retries with backoff if UI is loading |
-| 1 — History Server | `try_history_server` | Probes known proxy URL patterns |
-| 2 — DBFS event logs | `try_dbfs_event_logs` | Uses `cluster_log_conf` or `--event-log-path` |
-| 3 — Default paths | `find_default_event_logs` | Scans well-known DBFS directories |
-
-The Spark UI strategy includes warm-up retry: if the endpoint returns an HTML loading page, it retries with backoff delays of 3, 5, 10, 15, 20 seconds (~53s total).
+## `orchestrator.rs` — Data Polling & Assembly
 
 ### `poll_once`
 
@@ -211,6 +183,37 @@ fn compute_health_summary(
 ```
 
 Aggregates job counts, total I/O bytes, and suspect severity counts into a `HealthSummary` for the summary bar widget.
+
+## `poller.rs` — Background Poller
+
+### `run_poller`
+
+```rust
+pub async fn run_poller(
+    client: Arc<SparkHttpClient>,
+    databricks: Arc<DatabricksClient>,
+    config: Arc<Config>,
+    tx: mpsc::UnboundedSender<Action>,
+    poll_interval: Duration,
+)
+```
+
+1. Discovers the application ID (or detects cluster unreachable → historical fallback)
+2. Enters a live poll loop: `poll_once` (from `orchestrator.rs`) → send result via channel → sleep
+3. On connection loss during polling, falls back to historical data via `try_load_historical`
+
+### Historical Fallback Chain
+
+When the cluster is unreachable, `try_load_historical` attempts these strategies in order:
+
+| Strategy | Function | Condition |
+|----------|----------|-----------|
+| 0 — Spark UI | `try_sparkui` | Requires `spark_context_id`; retries with backoff if UI is loading |
+| 1 — History Server | `try_history_server` | Probes known proxy URL patterns |
+| 2 — DBFS event logs | `try_dbfs_event_logs` | Uses `cluster_log_conf` or `--event-log-path` |
+| 3 — Default paths | `find_default_event_logs` | Scans well-known DBFS directories |
+
+The Spark UI strategy includes warm-up retry: if the endpoint returns an HTML loading page, it retries with backoff delays defined in `SPARKUI_RETRY_DELAYS` (3, 5, 10, 15, 20 seconds — ~53s total).
 
 ### `DataPayload`
 
