@@ -8,16 +8,19 @@ Contains the terminal UI: app state machine, event loop, tab rendering, widgets,
 
 | File | Purpose |
 |------|---------|
-| `app.rs` | `App` struct, event loop, key handling, rendering dispatch |
+| `app/` | `App` struct, event loop, key handling, rendering dispatch (`state.rs`, `input.rs`, `render.rs`) |
 | `theme.rs` | Color and style functions |
-| `tabs/jobs.rs` | Jobs table, job detail, SQL detail, stage detail views |
+| `highlight.rs` | SQL/plan syntax highlighting |
+| `tabs/jobs_list.rs` | Jobs table view |
+| `tabs/job_detail.rs` | Stage breakdown for a selected job |
+| `tabs/sql_detail.rs` | SQL execution plan view (scrollable) |
+| `tabs/stage_detail.rs` | Detailed stage metrics view |
 | `tabs/suspects.rs` | Suspects table view |
-| `widgets/bar_chart.rs` | Duration bar chart for stage comparison |
 | `widgets/help.rs` | Help overlay (keybinding reference + SQL recommendations) |
 | `widgets/status_line.rs` | Status bar with cluster info and last update time |
 | `widgets/summary_bar.rs` | Health summary bar (top issues, job/IO counts) |
 
-## `app.rs` — App State
+## `app/` — App State
 
 ### `Tab`
 
@@ -119,14 +122,29 @@ Pure functions that return `ratatui::style::Style`:
 
 Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 
-## `tabs/jobs.rs` — Jobs Tab
+## `tabs/jobs_list.rs` — Jobs List
 
 | Function | Description |
 |----------|-------------|
 | `format_submission_time(time)` | Formats submission time for display |
 | `render_jobs_tab(frame, area, app)` | Renders the jobs table with columns: ID, Status, Duration, Tasks, Failed, SQL, Submitted |
-| `render_job_detail(frame, area, job, stages, sql_executions, stage_state, critical_stages)` | Splits area into stage table (top) and duration bar chart (bottom). Critical path stages are annotated with "CP" |
+
+## `tabs/job_detail.rs` — Job Detail
+
+| Function | Description |
+|----------|-------------|
+| `render_job_detail(frame, area, job, stages, sql_executions, stage_state, critical_stages)` | Renders stage breakdown table for a job. Critical path stages are annotated with "CP" |
+
+## `tabs/sql_detail.rs` — SQL Detail
+
+| Function | Description |
+|----------|-------------|
 | `render_sql_detail(frame, area, job, scroll_state, suspects)` | Renders scrollable SQL execution plan text with syntax highlighting. Uses `ScrollViewState` from `tui-scrollview` |
+
+## `tabs/stage_detail.rs` — Stage Detail
+
+| Function | Description |
+|----------|-------------|
 | `render_stage_header(frame, area, stage, total_cluster_memory, sql_hint)` | Renders stage header with I/O metrics, CPU %, and optional SQL plan hint |
 | `render_duration_histogram(frame, area, tasks)` | Renders task duration histogram |
 | `render_executor_breakdown(frame, area, tasks)` | Renders per-executor breakdown table |
@@ -140,11 +158,12 @@ Size thresholds for byte styling: `MB = 1_048_576`, `GB = 1_073_741_824`.
 |----------|-------------|
 | `render_suspects_tab(frame, area, suspects, state, critical_stages)` | Renders suspects table with columns: Severity, Category, Stage, Job, Title, Detail, Recommendation. Table title: `"Suspects (severity → savings)"` |
 
-## `widgets/bar_chart.rs`
+## `highlight.rs` — Syntax Highlighting
 
 | Function | Description |
 |----------|-------------|
-| `render_duration_chart(frame, area, stages)` | Renders a horizontal bar chart comparing stage durations |
+| `highlight_sql(text)` | Applies syntax highlighting to SQL query text for display in the SQL detail view |
+| `highlight_spark_plan(text)` | Applies syntax highlighting to Spark physical plan text |
 
 ## `widgets/help.rs`
 

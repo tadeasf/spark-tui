@@ -11,7 +11,10 @@ Handles HTTP communication with the Spark REST API via the Databricks driver pro
 | `client.rs` | `SparkHttpClient` and `FetchError` |
 | `types.rs` | Spark API response types (serde) |
 | `spark.rs` | Endpoint methods on `SparkHttpClient` |
-| `poller.rs` | Background polling loop and data aggregation |
+| `databricks.rs` | `DatabricksClient` for Databricks REST API, DBFS, Spark UI, and History Server |
+| `orchestrator.rs` | `poll_once`, `assemble_data_payload`, `compute_health_summary` |
+| `poller.rs` | Background polling loop and historical fallback chain |
+| `eventlog/` | Event log parsing: DBFS download, gzip decompression, `SparkEvent` serde |
 
 ## `client.rs` — SparkHttpClient
 
@@ -96,20 +99,60 @@ Methods on `SparkHttpClient`:
 | `get_task_list` | `/applications/{id}/stages/{sid}/{attempt}/taskList` | `Vec<SparkTask>` |
 | `get_executors` | `/applications/{id}/executors` | `Vec<SparkExecutor>` |
 
-## `poller.rs` — Background Poller
+## `databricks.rs` — DatabricksClient
 
-### `run_poller`
+Thin client for Databricks REST API `/api/2.0/*` endpoints and workspace-level requests.
+
+### `DatabricksClient`
 
 ```rust
-pub async fn run_poller(
-    client: Arc<SparkHttpClient>,
-    tx: mpsc::UnboundedSender<Action>,
-    poll_interval: Duration,
-)
+pub struct DatabricksClient {
+    client: reqwest::Client,
+    base_url: String,        // e.g. https://{host}/api/2.0
+    workspace_root: String,  // e.g. https://{host}
+    token: String,
+    sparkui_cookie: Option<String>,
+}
 ```
 
-1. Discovers the application ID
-2. Enters a loop: `poll_once` → send result via channel → sleep
+### `SparkuiProbeResult`
+
+Tri-state result from probing a Spark UI endpoint:
+
+| Variant | Fields | Meaning |
+|---------|--------|---------|
+| `Ready` | `base_url`, `app_id` | Spark UI is serving JSON data |
+| `Loading` | `base_url` | Spark UI is authenticated but still downloading/parsing event logs |
+| `NotFound` | — | No accessible Spark UI endpoint found |
+
+### Key Methods
+
+| Method | Description |
+|--------|-------------|
+| `get_cluster_info` | Fetch cluster state, log config, and `spark_context_id` |
+| `try_sparkui_endpoint` | Probe Historical Spark UI REST API (tries Bearer + cookie auth, workspace + dataplane domains) |
+| `probe_sparkui_url` | Re-probe a single URL for retry after `Loading` state |
+| `fetch_sparkui_data` | Fetch all data (jobs, stages, SQL, tasks) from a ready Spark UI endpoint |
+| `discover_history_server` | Probe known Spark History Server proxy URL patterns |
+| `fetch_history_data` | Fetch all data from History Server |
+| `dbfs_list` / `dbfs_read_full` | DBFS file operations |
+| `find_default_event_logs` | Scan well-known DBFS paths for event log files |
+
+### Warm-up Detection
+
+The `is_loading_page()` helper detects HTML loading pages returned during Spark UI warm-up by checking for patterns like `<title>Loading</title>`, `loading spark ui`, `please wait`, or generic HTML responses.
+
+## `eventlog/` — Event Log Parsing
+
+| File | Purpose |
+|------|---------|
+| `events.rs` | `SparkEvent` serde types for Spark event log JSON lines |
+| `parser.rs` | `EventLogParser` — converts raw events into jobs, stages, SQL, tasks |
+| `loader.rs` | DBFS download + gzip decompression pipeline |
+
+The `load_event_log()` function orchestrates: discover log path → download from DBFS → decompress gzip → parse JSON lines → return structured data.
+
+## `orchestrator.rs` — Data Polling & Assembly
 
 ### `poll_once`
 
@@ -141,6 +184,37 @@ fn compute_health_summary(
 
 Aggregates job counts, total I/O bytes, and suspect severity counts into a `HealthSummary` for the summary bar widget.
 
+## `poller.rs` — Background Poller
+
+### `run_poller`
+
+```rust
+pub async fn run_poller(
+    client: Arc<SparkHttpClient>,
+    databricks: Arc<DatabricksClient>,
+    config: Arc<Config>,
+    tx: mpsc::UnboundedSender<Action>,
+    poll_interval: Duration,
+)
+```
+
+1. Discovers the application ID (or detects cluster unreachable → historical fallback)
+2. Enters a live poll loop: `poll_once` (from `orchestrator.rs`) → send result via channel → sleep
+3. On connection loss during polling, falls back to historical data via `try_load_historical`
+
+### Historical Fallback Chain
+
+When the cluster is unreachable, `try_load_historical` attempts these strategies in order:
+
+| Strategy | Function | Condition |
+|----------|----------|-----------|
+| 0 — Spark UI | `try_sparkui` | Requires `spark_context_id`; retries with backoff if UI is loading |
+| 1 — History Server | `try_history_server` | Probes known proxy URL patterns |
+| 2 — DBFS event logs | `try_dbfs_event_logs` | Uses `cluster_log_conf` or `--event-log-path` |
+| 3 — Default paths | `find_default_event_logs` | Scans well-known DBFS directories |
+
+The Spark UI strategy includes warm-up retry: if the endpoint returns an HTML loading page, it retries with backoff delays defined in `SPARKUI_RETRY_DELAYS` (3, 5, 10, 15, 20 seconds — ~53s total).
+
 ### `DataPayload`
 
 ```rust
@@ -156,11 +230,15 @@ pub struct DataPayload {
     pub stage_sql_hints: Arc<HashMap<i64, String>>,
     pub critical_stages: Arc<HashSet<i64>>,
     pub last_updated: String,
+    pub data_source: DataSourceMode,
+    pub data_source_detail: Option<String>,
 }
 ```
 
 Note: `DataPayload` is defined in `src/tui/mod.rs` and contains all data needed to render the TUI.
 
-**New fields in v2:**
+**Key fields:**
 - `stage_sql_hints` — maps `stage_id → String` with top SQL plan operations (e.g., "HashAggregate → Exchange → Scan parquet"), pre-computed for display in stage detail headers
 - `critical_stages` — set of stage IDs that represent the critical path (longest wall-clock stage per job), used for "CP" annotations in the job detail view
+- `data_source` — `DataSourceMode::Live` or `DataSourceMode::Historical`, displayed in the status line
+- `data_source_detail` — optional label like `"Spark UI"`, `"history server"`, or `"event logs"`, shown alongside the HISTORICAL badge

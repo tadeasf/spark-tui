@@ -74,6 +74,28 @@ spark-tui --profile my-workspace
 | `--cluster-id`    | `DATABRICKS_CLUSTER_ID`     | —           | Cluster ID                                              |
 | `--profile`, `-p` | `DATABRICKS_CONFIG_PROFILE` | auto-detect | Profile name from `~/.databrickscfg`                    |
 | `--poll-interval` | `SPARK_TUI_POLL_INTERVAL`   | `10`        | Refresh interval in seconds                             |
+| `--event-log-path`| `SPARK_TUI_EVENT_LOG_PATH`  | —           | DBFS path to Spark event log file (historical mode)     |
+| `--sparkui-cookie`| `SPARK_TUI_SPARKUI_COOKIE`  | —           | `DATAPLANE_DOMAIN_DBAUTH` cookie for Spark UI auth      |
+
+## Historical Mode
+
+When a cluster is **terminated**, spark-tui automatically falls back to historical data using a 4-strategy chain:
+
+1. **Spark UI REST API** — probes the Databricks Historical Spark UI endpoint (requires `--sparkui-cookie` for authenticated environments). If the UI is still warming up (downloading event logs), retries with backoff for ~53 seconds.
+2. **Spark History Server** — probes known Databricks history server proxy URLs.
+3. **DBFS event logs** — reads event logs from the cluster's configured log delivery path or `--event-log-path`.
+4. **Default DBFS paths** — scans well-known DBFS directories for event log files.
+
+The status line shows a **HISTORICAL** badge when viewing data from a terminated cluster.
+
+### Getting the Spark UI cookie
+
+For the Spark UI strategy on authenticated Databricks workspaces:
+
+1. Open the Spark UI in your browser (Cluster > Spark UI tab)
+2. Open DevTools (F12) > Application > Cookies
+3. Copy the value of `DATAPLANE_DOMAIN_DBAUTH` from the `adb-dp-*` domain
+4. Pass it via `--sparkui-cookie <value>` or `SPARK_TUI_SPARKUI_COOKIE=<value>`
 
 ## Keybindings
 

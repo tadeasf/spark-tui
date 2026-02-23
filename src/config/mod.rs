@@ -28,6 +28,14 @@ pub struct CliArgs {
     /// Poll interval in seconds
     #[arg(long, default_value = "10", env = "SPARK_TUI_POLL_INTERVAL")]
     pub poll_interval: u64,
+
+    /// Path to a Spark event log file on DBFS (used when cluster is terminated)
+    #[arg(long, env = "SPARK_TUI_EVENT_LOG_PATH")]
+    pub event_log_path: Option<String>,
+
+    /// Cookie value for Spark UI authentication (DATAPLANE_DOMAIN_DBAUTH)
+    #[arg(long, env = "SPARK_TUI_SPARKUI_COOKIE")]
+    pub sparkui_cookie: Option<String>,
 }
 
 /// Resolved configuration with all required fields present.
@@ -37,6 +45,8 @@ pub struct Config {
     pub token: String,
     pub cluster_id: String,
     pub poll_interval: u64,
+    pub event_log_path: Option<String>,
+    pub sparkui_cookie: Option<String>,
 }
 
 impl Config {
@@ -52,6 +62,26 @@ impl Config {
             host, self.cluster_id
         )
     }
+
+    /// Base URL for the Databricks REST API (`/api/2.0`).
+    pub fn databricks_api_url(&self) -> String {
+        let host = self.host.trim_end_matches('/');
+        let host = host
+            .strip_prefix("https://")
+            .or_else(|| host.strip_prefix("http://"))
+            .unwrap_or(host);
+        format!("https://{}/api/2.0", host)
+    }
+
+    /// Workspace root URL (`https://{host}`) without any API path suffix.
+    pub fn workspace_root_url(&self) -> String {
+        let host = self.host.trim_end_matches('/');
+        let host = host
+            .strip_prefix("https://")
+            .or_else(|| host.strip_prefix("http://"))
+            .unwrap_or(host);
+        format!("https://{}", host)
+    }
 }
 
 /// Resolve config from CLI args > env vars (handled by clap) > ~/.databrickscfg.
@@ -65,6 +95,8 @@ pub fn resolve_config() -> Result<Config, String> {
             token: args.token.take().unwrap(),
             cluster_id: args.cluster_id.take().unwrap(),
             poll_interval: args.poll_interval,
+            event_log_path: args.event_log_path.take(),
+            sparkui_cookie: args.sparkui_cookie.take(),
         });
     }
 
@@ -119,6 +151,8 @@ pub fn resolve_config() -> Result<Config, String> {
         token,
         cluster_id,
         poll_interval: args.poll_interval,
+        event_log_path: args.event_log_path,
+        sparkui_cookie: args.sparkui_cookie,
     })
 }
 
@@ -219,85 +253,4 @@ fn find_complete_profile(profiles: &HashMap<String, Profile>) -> Option<&Profile
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn test_parse_databrickscfg() {
-        let mut tmp = tempfile();
-        writeln!(
-            tmp.1,
-            r#"
-; comment
-[DEFAULT]
-
-[my-profile]
-host       = https://adb-123.6.azuredatabricks.net
-cluster_id = 0530-080901-abc123
-token      = dapi1234567890
-
-[other]
-host=https://adb-999.11.azuredatabricks.net/
-auth_type=azure-cli
-"#
-        )
-        .unwrap();
-        tmp.1.flush().unwrap();
-
-        let profiles = parse_databrickscfg(&tmp.0).unwrap();
-        assert!(profiles.contains_key("DEFAULT"));
-        assert!(profiles.contains_key("my-profile"));
-        assert!(profiles.contains_key("other"));
-
-        let p = &profiles["my-profile"];
-        assert_eq!(p["host"], "https://adb-123.6.azuredatabricks.net");
-        assert_eq!(p["cluster_id"], "0530-080901-abc123");
-        assert_eq!(p["token"], "dapi1234567890");
-
-        let o = &profiles["other"];
-        assert_eq!(o["auth_type"], "azure-cli");
-    }
-
-    #[test]
-    fn test_find_complete_profile() {
-        let mut profiles = HashMap::new();
-
-        // Incomplete profile (no token)
-        let mut incomplete = HashMap::new();
-        incomplete.insert("host".to_string(), "h".to_string());
-        incomplete.insert("cluster_id".to_string(), "c".to_string());
-        profiles.insert("incomplete".to_string(), incomplete);
-
-        // Complete profile
-        let mut complete = HashMap::new();
-        complete.insert("host".to_string(), "h".to_string());
-        complete.insert("token".to_string(), "t".to_string());
-        complete.insert("cluster_id".to_string(), "c".to_string());
-        profiles.insert("complete".to_string(), complete);
-
-        let found = find_complete_profile(&profiles).unwrap();
-        assert_eq!(found["token"], "t");
-    }
-
-    #[test]
-    fn test_base_url_strips_scheme_and_trailing_slash() {
-        let config = Config {
-            host: "https://adb-123.azuredatabricks.net/".to_string(),
-            token: "tok".to_string(),
-            cluster_id: "abc".to_string(),
-            poll_interval: 10,
-        };
-        assert_eq!(
-            config.base_url(),
-            "https://adb-123.azuredatabricks.net/driver-proxy-api/o/0/abc/40001/api/v1"
-        );
-    }
-
-    /// Helper to create a temporary file and return (path, file).
-    fn tempfile() -> (PathBuf, std::fs::File) {
-        let path = std::env::temp_dir().join(format!("spark-tui-test-{}", std::process::id()));
-        let file = std::fs::File::create(&path).unwrap();
-        (path, file)
-    }
-}
+mod tests;
