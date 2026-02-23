@@ -18,3 +18,5 @@ chrono = { version = "0.4", features = ["serde"] }
 syntect = { version = "5", default-features = true }
 syntect-tui = "3"
 tui-scrollview = "0.5"
+flate2 = "1"
+base64 = "0.22"

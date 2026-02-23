@@ -12,6 +12,13 @@ use crate::fetch::client::FetchError;
 use crate::fetch::types::{ClusterResources, SparkSqlExecution, SparkStage, SparkTask};
 use crossterm::event::KeyEvent;
 
+/// Whether data comes from the live Spark REST API or parsed historical event logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSourceMode {
+    Live,
+    Historical,
+}
+
 /// All data needed to render the TUI.
 #[derive(Debug, Clone)]
 pub struct DataPayload {
@@ -26,6 +33,9 @@ pub struct DataPayload {
     pub stage_sql_hints: Arc<HashMap<i64, String>>,
     pub critical_stages: Arc<HashSet<i64>>,
     pub last_updated: String,
+    pub data_source: DataSourceMode,
+    /// Optional detail about the data source (e.g. "Spark UI", "event logs").
+    pub data_source_detail: Option<String>,
 }
 
 /// Actions sent through the channel to the app event loop.
@@ -38,4 +48,5 @@ pub enum Action {
     FetchError(FetchError),
     TaskDataLoaded(i64, Vec<SparkTask>),
     TaskFetchFailed(i64, String),
+    StatusMessage(String),
 }

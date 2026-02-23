@@ -9,7 +9,7 @@ spark-tui maps HTTP status codes from the Spark REST API to user-friendly error 
 | **Unauthorized** | 401 | Token expired or invalid | Regenerate your token at Databricks Settings > Developer > Access Tokens |
 | **Forbidden** | 403 | Insufficient permissions | Check that your token has access to the specified cluster |
 | **Not Found** | 404 | Spark UI not available | The Spark application may have ended. Start a new Spark session or check the application ID |
-| **Service Unavailable** | 503 | Cluster not reachable | Verify the cluster is running in the Databricks workspace |
+| **Service Unavailable** | 503 | Cluster not reachable | spark-tui will automatically check cluster state and attempt to load historical data if the cluster is terminated. If automatic fallback fails, verify the cluster is running or provide `--event-log-path` / `--sparkui-cookie` |
 | **No Applications** | — | No Spark apps on cluster | Ensure a Spark session is active on the cluster (e.g., run a notebook or submit a job) |
 
 ## Configuration Errors
@@ -75,6 +75,48 @@ spark-tui uses 256-color mode via ratatui/crossterm. Ensure your terminal emulat
 If SQL plan text appears corrupted or causes display glitches, this is likely caused by raw newlines embedded in SQL text. spark-tui sanitizes these via `sanitize_for_span()` in `util/format.rs`, which replaces embedded `\n`, `\r`, and `\t` characters with spaces before passing text to ratatui's `Line`/`Span` types. Ratatui's differential renderer tracks cursor positions per line, so embedded newlines corrupt its state.
 
 If you encounter rendering artifacts, check whether the SQL text contains unusual control characters and file an issue.
+
+## Historical Mode
+
+### Spark UI shows "loading" but never becomes ready
+
+The Historical Spark UI needs to download and parse event logs from DBFS, which can take a while for large applications. spark-tui retries with backoff for ~53 seconds. If it still doesn't become ready:
+
+- Try opening the Spark UI in your browser first to trigger the warm-up
+- Check the log file (`/tmp/spark-tui.log`) for the exact URL being probed
+- The event log download may take longer than 53 seconds for very large applications — try again after waiting
+
+### Historical data loads but is incomplete
+
+When using historical mode, some data may not be available:
+
+- **Executor metrics** are not available after termination (cluster resources will show as default/zero)
+- **Real-time task data** is replaced by complete post-mortem task data
+- **SQL plan descriptions** may be less detailed depending on the data source
+
+### Cookie authentication fails
+
+If `--sparkui-cookie` doesn't work:
+
+1. Verify the cookie is from the correct domain (`adb-dp-*`, not `adb-*`)
+2. Cookies expire — regenerate by visiting the Spark UI in your browser
+3. Check `/tmp/spark-tui.log` for the HTTP status code returned by cookie probes
+4. The cookie value should be the JWT-like string from `DATAPLANE_DOMAIN_DBAUTH`, not the entire cookie header
+
+### All historical strategies fail
+
+If spark-tui reports "Could not load historical data", check:
+
+1. **Cluster log delivery** — is it configured? (Cluster settings > Logging)
+2. **DBFS permissions** — does your token have access to read DBFS paths?
+3. **Event log path** — try specifying it explicitly with `--event-log-path`
+4. **Spark UI cookie** — try providing `--sparkui-cookie` (see [Configuration](./configuration.md#getting-the---sparkui-cookie))
+
+Enable debug logging to see which strategies were attempted:
+
+```bash
+RUST_LOG=debug spark-tui --cluster-id ...
+```
 
 ## Deserialization Errors
 

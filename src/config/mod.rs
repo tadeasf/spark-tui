@@ -28,6 +28,14 @@ pub struct CliArgs {
     /// Poll interval in seconds
     #[arg(long, default_value = "10", env = "SPARK_TUI_POLL_INTERVAL")]
     pub poll_interval: u64,
+
+    /// Path to a Spark event log file on DBFS (used when cluster is terminated)
+    #[arg(long, env = "SPARK_TUI_EVENT_LOG_PATH")]
+    pub event_log_path: Option<String>,
+
+    /// Cookie value for Spark UI authentication (DATAPLANE_DOMAIN_DBAUTH)
+    #[arg(long, env = "SPARK_TUI_SPARKUI_COOKIE")]
+    pub sparkui_cookie: Option<String>,
 }
 
 /// Resolved configuration with all required fields present.
@@ -37,6 +45,8 @@ pub struct Config {
     pub token: String,
     pub cluster_id: String,
     pub poll_interval: u64,
+    pub event_log_path: Option<String>,
+    pub sparkui_cookie: Option<String>,
 }
 
 impl Config {
@@ -52,6 +62,26 @@ impl Config {
             host, self.cluster_id
         )
     }
+
+    /// Base URL for the Databricks REST API (`/api/2.0`).
+    pub fn databricks_api_url(&self) -> String {
+        let host = self.host.trim_end_matches('/');
+        let host = host
+            .strip_prefix("https://")
+            .or_else(|| host.strip_prefix("http://"))
+            .unwrap_or(host);
+        format!("https://{}/api/2.0", host)
+    }
+
+    /// Workspace root URL (`https://{host}`) without any API path suffix.
+    pub fn workspace_root_url(&self) -> String {
+        let host = self.host.trim_end_matches('/');
+        let host = host
+            .strip_prefix("https://")
+            .or_else(|| host.strip_prefix("http://"))
+            .unwrap_or(host);
+        format!("https://{}", host)
+    }
 }
 
 /// Resolve config from CLI args > env vars (handled by clap) > ~/.databrickscfg.
@@ -65,6 +95,8 @@ pub fn resolve_config() -> Result<Config, String> {
             token: args.token.take().unwrap(),
             cluster_id: args.cluster_id.take().unwrap(),
             poll_interval: args.poll_interval,
+            event_log_path: args.event_log_path.take(),
+            sparkui_cookie: args.sparkui_cookie.take(),
         });
     }
 
@@ -119,6 +151,8 @@ pub fn resolve_config() -> Result<Config, String> {
         token,
         cluster_id,
         poll_interval: args.poll_interval,
+        event_log_path: args.event_log_path,
+        sparkui_cookie: args.sparkui_cookie,
     })
 }
 

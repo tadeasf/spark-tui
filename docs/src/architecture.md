@@ -12,7 +12,9 @@ src/
 │   ├── client.rs        SparkHttpClient + FetchError
 │   ├── spark.rs         Endpoint methods (get_jobs, get_stages, etc.)
 │   ├── types.rs         Spark API response types (serde)
-│   └── poller.rs        Background polling loop + data aggregation
+│   ├── databricks.rs    DatabricksClient (cluster info, DBFS, sparkui, history server)
+│   ├── poller.rs        Background polling loop + historical fallback chain
+│   └── eventlog/        Event log parsing (DBFS download, gzip, SparkEvent serde)
 ├── analyze/
 │   ├── types.rs         Suspect, Severity, SuspectCategory, BottleneckPattern
 │   ├── skew.rs          Data skew detection (CV + max/median)
@@ -61,7 +63,7 @@ src/
 
 3. **Endpoint methods** (`fetch/spark.rs`) — `discover_app_id`, `get_jobs`, `get_stages`, `get_sql_executions`, `get_task_list`, `get_executors` — each calls the Spark REST API and deserializes the response
 
-4. **Background poller** (`fetch/poller.rs`) — `run_poller` runs in a tokio task, calling `poll_once` on each interval. `poll_once`:
+4. **Background poller** (`fetch/poller.rs`) — `run_poller` runs in a tokio task, calling `poll_once` on each interval. When the cluster becomes unreachable (503 or terminated), the poller automatically falls back to historical data via a 4-strategy chain: Spark UI REST API (with warm-up retry), Spark History Server proxy, DBFS event logs, and default DBFS path scanning. `poll_once`:
    - Fetches jobs, stages, SQL executions, and executors concurrently via 4-way `tokio::join!`
    - Aggregates active executors into `ClusterResources` (total memory, cores, executor count)
    - Builds cross-reference maps (job↔SQL, stage↔job)

@@ -36,6 +36,15 @@ pub enum FetchError {
 
     #[error("No Spark applications found on the cluster.")]
     NoApplications,
+
+    #[error("Cluster is terminated. {0}")]
+    ClusterTerminated(String),
+
+    #[error("No event logs found. Configure cluster log delivery or use --event-log-path.")]
+    NoEventLogs,
+
+    #[error("Event log error: {0}")]
+    EventLogError(String),
 }
 
 pub struct SparkHttpClient {

@@ -15,14 +15,14 @@ use crate::analyze::suspects::{
 use crate::analyze::types::{HealthSummary, RankedJob, Severity};
 use crate::fetch::client::SparkHttpClient;
 use crate::fetch::types::ClusterResources;
-use crate::tui::DataPayload;
+use crate::tui::{DataPayload, DataSourceMode};
 use crate::util::time::duration_between;
 
+/// Fetch live data from the Spark REST API and assemble a `DataPayload`.
 pub(crate) async fn poll_once(
     client: &SparkHttpClient,
     app_id: &str,
 ) -> Result<DataPayload, crate::fetch::client::FetchError> {
-    // Fetch jobs, stages, SQL, executors concurrently
     let (jobs_res, stages_res, sql_res, executors_res) = tokio::join!(
         client.get_jobs(app_id),
         client.get_stages(app_id),
@@ -52,23 +52,50 @@ pub(crate) async fn poll_once(
         }
     };
 
+    assemble_data_payload(
+        app_id,
+        jobs,
+        stages,
+        sql_executions,
+        cluster_resources,
+        HashMap::new(),
+        DataSourceMode::Live,
+        Some(client),
+        None,
+    )
+    .await
+}
+
+/// Shared analysis pipeline: builds ranked jobs, detects suspects, produces `DataPayload`.
+///
+/// When `pre_fetched_tasks` is non-empty (historical mode), skips live task fetching.
+/// When `client` is `Some` (live mode), fetches tasks for top stages on-the-fly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn assemble_data_payload(
+    app_id: &str,
+    jobs: Vec<crate::fetch::types::SparkJob>,
+    stages: Vec<crate::fetch::types::SparkStage>,
+    sql_executions: Vec<crate::fetch::types::SparkSqlExecution>,
+    cluster_resources: ClusterResources,
+    pre_fetched_tasks: HashMap<i64, Vec<crate::fetch::types::SparkTask>>,
+    data_source: DataSourceMode,
+    client: Option<&SparkHttpClient>,
+    data_source_detail: Option<String>,
+) -> Result<DataPayload, crate::fetch::client::FetchError> {
     // Build maps
     let job_to_sql = build_job_to_sql_map(&sql_executions);
     let stage_to_job = build_stage_to_job_map(&jobs);
 
-    // Build sql_descriptions: sql_id -> description
     let sql_descriptions: HashMap<i64, String> = sql_executions
         .iter()
         .map(|sql| (sql.id, sql.description.clone()))
         .collect();
 
-    // Build sql plan_description lookup: sql_id -> plan_description
     let sql_plans: HashMap<i64, String> = sql_executions
         .iter()
         .map(|sql| (sql.id, sql.plan_description.clone()))
         .collect();
 
-    // Build stage_name lookup
     let stage_names: HashMap<i64, &str> = stages
         .iter()
         .map(|s| (s.stage_id, s.name.as_str()))
@@ -98,10 +125,9 @@ pub(crate) async fn poll_once(
         })
         .collect();
 
-    // Sort: running jobs first (no duration), then by duration descending
     ranked_jobs.sort_by_key(|j| std::cmp::Reverse(j.duration_ms));
 
-    // Build suspect context with all lookup maps
+    // Build suspect context
     let ctx = SuspectContext::new(&stage_to_job, &job_to_sql, &sql_descriptions, &sql_plans);
 
     // Stage-level analysis (no extra API calls)
@@ -126,41 +152,68 @@ pub(crate) async fn poll_once(
         .flat_map(|detect| detect(&stages, &ctx))
         .collect();
 
-    // Fetch task lists for stages selected by heuristic analysis
-    let top_stages = stages_for_task_analysis(&stages);
-    let mut stage_tasks: HashMap<i64, Vec<crate::fetch::types::SparkTask>> = HashMap::new();
-    for (stage_id, attempt_id) in &top_stages {
-        match client.get_task_list(app_id, *stage_id, *attempt_id).await {
-            Ok(tasks) => {
-                let job_id = ctx.job_id(*stage_id);
-                let sname = stage_names.get(stage_id).copied();
-                let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
-                let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid));
-                let mut skew_suspects = detect_skew(
-                    &tasks,
-                    *stage_id,
-                    job_id,
-                    sname,
-                    sql_id,
-                    sql_desc.map(|s| s.as_str()),
-                );
-                // Enrich with sql_plan_hint from context
-                let hint = ctx.resolve_plan_hint_for(*stage_id);
-                if let Some(h) = &hint {
-                    for suspect in &mut skew_suspects {
-                        suspect.sql_plan_hint = Some(h.clone());
+    // Task-level analysis: use pre-fetched tasks (historical) or fetch live
+    let mut stage_tasks = pre_fetched_tasks;
+
+    if stage_tasks.is_empty() {
+        // Live mode: fetch tasks for top stages
+        if let Some(client) = client {
+            let top_stages = stages_for_task_analysis(&stages);
+            for (stage_id, attempt_id) in &top_stages {
+                match client.get_task_list(app_id, *stage_id, *attempt_id).await {
+                    Ok(tasks) => {
+                        let job_id = ctx.job_id(*stage_id);
+                        let sname = stage_names.get(stage_id).copied();
+                        let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
+                        let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid));
+                        let mut skew_suspects = detect_skew(
+                            &tasks,
+                            *stage_id,
+                            job_id,
+                            sname,
+                            sql_id,
+                            sql_desc.map(|s| s.as_str()),
+                        );
+                        let hint = ctx.resolve_plan_hint_for(*stage_id);
+                        if let Some(h) = &hint {
+                            for suspect in &mut skew_suspects {
+                                suspect.sql_plan_hint = Some(h.clone());
+                            }
+                        }
+                        all_suspects.extend(skew_suspects);
+                        stage_tasks.insert(*stage_id, tasks);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch tasks for stage {}/{}: {}",
+                            stage_id, attempt_id, e
+                        );
                     }
                 }
-                all_suspects.extend(skew_suspects);
-                // Persist tasks for UI stage detail view
-                stage_tasks.insert(*stage_id, tasks);
             }
-            Err(e) => {
-                warn!(
-                    "Failed to fetch tasks for stage {}/{}: {}",
-                    stage_id, attempt_id, e
-                );
+        }
+    } else {
+        // Historical mode: run skew detection on all pre-fetched task sets
+        for (stage_id, tasks) in &stage_tasks {
+            let job_id = ctx.job_id(*stage_id);
+            let sname = stage_names.get(stage_id).copied();
+            let sql_id = job_id.and_then(|jid| job_to_sql.get(&jid).copied());
+            let sql_desc = sql_id.and_then(|sid| sql_descriptions.get(&sid));
+            let mut skew_suspects = detect_skew(
+                tasks,
+                *stage_id,
+                job_id,
+                sname,
+                sql_id,
+                sql_desc.map(|s| s.as_str()),
+            );
+            let hint = ctx.resolve_plan_hint_for(*stage_id);
+            if let Some(h) = &hint {
+                for suspect in &mut skew_suspects {
+                    suspect.sql_plan_hint = Some(h.clone());
+                }
             }
+            all_suspects.extend(skew_suspects);
         }
     }
 
@@ -194,7 +247,6 @@ pub(crate) async fn poll_once(
         })
         .collect();
 
-    // Compute health summary
     let summary = compute_health_summary(&ranked_jobs, &stages, &suspects);
 
     let now = chrono::Utc::now().format("%H:%M:%S").to_string();
@@ -211,6 +263,8 @@ pub(crate) async fn poll_once(
         stage_sql_hints: Arc::new(stage_sql_hints),
         critical_stages: Arc::new(critical_stages),
         last_updated: now,
+        data_source,
+        data_source_detail,
     })
 }
 
@@ -239,7 +293,6 @@ fn compute_health_summary(
         .filter(|s| s.severity == Severity::Warning)
         .count();
 
-    // Top 3 critical issues for the summary line
     let top_issues: Vec<String> = suspects
         .iter()
         .filter(|s| s.severity == Severity::Critical)

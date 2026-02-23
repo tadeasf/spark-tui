@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event};
 use fetch::SparkHttpClient;
+use fetch::databricks::DatabricksClient;
 use fetch::poller::run_poller;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
@@ -50,6 +51,13 @@ async fn main() {
 
     let base_url = config.base_url();
     let client = Arc::new(SparkHttpClient::new(base_url, config.token.clone()));
+    let databricks_client = Arc::new(DatabricksClient::new(
+        config.databricks_api_url(),
+        config.workspace_root_url(),
+        config.token.clone(),
+        config.sparkui_cookie.clone(),
+    ));
+    let config = Arc::new(config);
     let poll_interval = Duration::from_secs(config.poll_interval);
 
     // Create channel
@@ -58,8 +66,17 @@ async fn main() {
     // Spawn poller task
     let poller_tx = tx.clone();
     let poller_client = Arc::clone(&client);
+    let poller_databricks = Arc::clone(&databricks_client);
+    let poller_config = Arc::clone(&config);
     tokio::spawn(async move {
-        run_poller(poller_client, poller_tx, poll_interval).await;
+        run_poller(
+            poller_client,
+            poller_databricks,
+            poller_config,
+            poller_tx,
+            poll_interval,
+        )
+        .await;
     });
 
     // Spawn terminal event reader task
@@ -88,7 +105,7 @@ async fn main() {
     let mut terminal = ratatui::init();
 
     // Run app
-    let mut app = App::new(config.cluster_id, Arc::clone(&client), tx.clone());
+    let mut app = App::new(config.cluster_id.clone(), Arc::clone(&client), tx.clone());
     let result = app.run(&mut terminal, rx).await;
 
     // Restore terminal

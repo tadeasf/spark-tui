@@ -68,6 +68,9 @@ impl App {
                 self.pending_task_fetches.remove(&stage_id);
                 warn!("Failed to fetch tasks for stage {}: {}", stage_id, err);
             }
+            Action::StatusMessage(msg) => {
+                self.error_msg = Some(msg);
+            }
             Action::Resize(_, _) => {}
             Action::Mouse(_) => {}
         }

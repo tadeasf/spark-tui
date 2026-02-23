@@ -229,6 +229,15 @@ impl App {
             .as_ref()
             .map(|d| d.last_updated.as_str())
             .unwrap_or("--:--:--");
+        let data_source = self
+            .data
+            .as_ref()
+            .map(|d| d.data_source)
+            .unwrap_or(crate::tui::DataSourceMode::Live);
+        let data_source_detail = self
+            .data
+            .as_ref()
+            .and_then(|d| d.data_source_detail.as_deref());
 
         let hint = match self.view_mode {
             ViewMode::List => "q:quit Tab:switch j/k:nav Enter:detail h:help",
@@ -243,6 +252,8 @@ impl App {
             &self.cluster_id,
             app_id,
             last_updated,
+            data_source,
+            data_source_detail,
             self.error_msg.as_deref(),
             hint,
         );

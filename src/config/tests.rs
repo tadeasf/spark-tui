@@ -65,6 +65,8 @@ fn test_base_url_strips_scheme_and_trailing_slash() {
         token: "tok".to_string(),
         cluster_id: "abc".to_string(),
         poll_interval: 10,
+        event_log_path: None,
+        sparkui_cookie: None,
     };
     assert_eq!(
         config.base_url(),
