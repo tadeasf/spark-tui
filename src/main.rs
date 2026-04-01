@@ -86,7 +86,11 @@ async fn main() {
             match tokio::task::spawn_blocking(event::read).await {
                 Ok(Ok(evt)) => {
                     let action = match evt {
-                        Event::Key(key) => Action::Key(key),
+                        Event::Key(key)
+                            if key.kind == crossterm::event::KeyEventKind::Press =>
+                        {
+                            Action::Key(key)
+                        }
                         Event::Mouse(mouse) => Action::Mouse(mouse),
                         Event::Resize(w, h) => Action::Resize(w, h),
                         _ => continue,
